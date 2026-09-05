@@ -1,0 +1,17 @@
+runs/
+cache/
+data/
+figures/
+inverse_evaluation/cache_hsp/*/
+inverse_evaluation/spatial_out/
+inverse_evaluation/spatial_figs/
+inverse_evaluation/validate_out/
+inverse_evaluation/out_matrix/
+baselines_analyses/generated/
+training_sweeps/logs/
+__pycache__/
+*.pyc
+*.pth
+*.npz
+*.log
+*.out
