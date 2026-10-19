@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import models_fixedn
+import models_v2
 from channel_select import MODES, CLUSTER_METHODS, REGIONS
 from dataset import build_experiment_datasets, precompute_preprocessed
 from engine import (adjust_learning_rate, train_one_epoch, evaluate,
@@ -93,7 +94,41 @@ def get_args():
                             'fixedn_ecgi_narrow', 'fixedn_ecgi_wide',
                             'mcma_unet',
                             'fixedn_ecgi_wide384', 'fixedn_ecgi_wide_deep',
-                            'fixedn_ecgi_shallow', 'fixedn_ecgi_deep'])
+                            'fixedn_ecgi_shallow', 'fixedn_ecgi_deep']
+                           + list(models_v2.POSQ_MODELS))
+    # ---- v2 (PosQ-MAE) options; only read by the posq_* models (models_v2.py) ----
+    p.add_argument('--dec_depth', type=int, default=None,
+                   help='depth of the position-queried decoder (default: the factory value)')
+    p.add_argument('--enc_depth', type=int, default=None, help='encoder depth override (capacity checks)')
+    p.add_argument('--dec_dim', type=int, default=None, help='decoder width override (capacity checks)')
+    p.add_argument('--dec_heads', type=int, default=None, help='decoder attention heads override')
+    p.add_argument('--dec_tsa', action='store_true', default=False,
+                   help='temporal self-attention among the queries of the same electrode in every decoder block')
+    p.add_argument('--tsa_order', type=str, default='post', choices=['post', 'pre'],
+                   help='decoder block order with --dec_tsa: post = cross-attn -> temporal self-attn -> MLP '
+                        '(default); pre = temporal self-attn -> cross-attn -> MLP')
+    p.add_argument('--dec_ssa', action='store_true', default=False,
+                   help='v2: spatial query interaction -- the queries of the same time patch (across electrodes) attend to one another in every decoder block')
+    p.add_argument('--tokenizer', type=str, default='linear', choices=['linear', 'tnt', 'conv'],
+                   help='input tokenizer: linear patch embedding (v1) | + intra-patch self-attention | + conv stem')
+    p.add_argument('--head', type=str, default='linear', choices=['linear', 'subattn', 'convref'],
+                   help='output head: linear (v1) | + sub-token local attention across patch boundaries | + conv refinement')
+    p.add_argument('--sub_len', type=int, default=5, help='sub-token length (samples) of tnt / subattn')
+    p.add_argument('--inner_dim', type=int, default=32, help='sub-token width of tnt / subattn')
+    p.add_argument('--inner_depth', type=int, default=2, help='number of sub-token blocks of tnt / subattn')
+    p.add_argument('--head_ctx', type=int, default=1, help='subattn: neighbouring patches visible on each side')
+    p.add_argument('--time_embed', type=str, default='sincos', choices=['sincos', 'learned'])
+    p.add_argument('--ppe_type', type=str, default='mlp', choices=['mlp', 'fourier'])
+    p.add_argument('--tmask_mode', type=str, default='none', choices=['none', 'dropout', 'span', 'alternate'],
+                   help='time-patch masking mixed with whole-electrode masking (every second training step)')
+    p.add_argument('--tmask_ratio', type=float, default=0.0)
+    p.add_argument('--query_frac', type=float, default=1.0,
+                   help='fraction of the masked electrodes decoded per TRAINING step (eval decodes all)')
+    p.add_argument('--tag', type=str, default='', help='prefix of the run directory name (e.g. the pilot id)')
+    p.add_argument('--downstream_splits', type=str, nargs='*', default=['val'],
+                   help="splits of the post-training downstream AT/RT report. v2 pilots use the VALIDATION "
+                        "patients only ('val' -> at_rt_results_val.json); pass test_internal test_external "
+                        "for a frozen configuration (-> at_rt_results.json)")
     p.add_argument('--patch_size', type=int, nargs=2, default=[1, 50])
     # training
     p.add_argument('--epochs', type=int, default=800)
@@ -105,8 +140,23 @@ def get_args():
     p.add_argument('--train_frac', type=float, default=1.0,
                    help='fraction of training PATIENTS kept (stratified per cohort)')
     p.add_argument('--train_sources', type=str, default='both',
-                   choices=['both', 'cohortA', 'cohortB'],
-                   help='which training cohorts may contribute')
+                   choices=['both', 'cohortA', 'cohortB', 'sim', 'sim+both'],
+                   help='which training cohorts may contribute; sim = Route A '
+                        'simulated cohort only, sim+both = simulated + clinical')
+    # simulation experiments (simulation/make_dataset.py)
+    p.add_argument('--real_repeat', type=int, default=1,
+                   help='sim+both: list every clinical recording this many times '
+                        'per epoch (balanced real:sim sampling)')
+    p.add_argument('--val_source', type=str, default='auto', choices=['auto', 'real', 'sim'],
+                   help='validation split for checkpoint selection (auto: sim for '
+                        'train_sources=sim, clinical otherwise)')
+    p.add_argument('--init_from', type=str, default='',
+                   help='checkpoint whose model weights initialise training '
+                        '(sim-pretrain -> clinical fine-tune); optimizer restarts')
+    p.add_argument('--init_tag', type=str, default='',
+                   help='short label of --init_from for the run name (default: "sim")')
+    p.add_argument('--test_limit', type=int, default=0,
+                   help='smoke tests: evaluate only the first N test recordings')
     p.add_argument('--subsample_seed', type=int, default=0,
                    help='seed of the patient subsampling draw')
     p.add_argument('--rng_seed', type=int, default=None,
@@ -163,9 +213,16 @@ def build_run_name(args, eff):
     rs = getattr(args, 'rng_seed', None)
     data_tag = (f"_rs{rs}" if rs is not None and rs != args.seed else "") + data_tag
     data_tag = (f"_pe-{pe}" if pe != 'ppe' else "") + data_tag
+    rr_ = getattr(args, 'real_repeat', 1)
+    data_tag = data_tag + (f"_rr{rr_}" if ts == 'sim+both' and rr_ > 1 else "")
+    vs_ = getattr(args, 'val_source', 'auto')
+    data_tag = data_tag + (f"_val-{vs_}" if vs_ not in ('auto',) and not (vs_ == 'sim' and ts == 'sim') and not (vs_ == 'real' and ts != 'sim') else "")
+    if getattr(args, 'init_from', ''):
+        data_tag = data_tag + f"_init-{getattr(args, 'init_tag', '') or 'sim'}"
     reg = getattr(args, 'select_region', 'all')
     data_tag = data_tag + (f"_reg-{reg}" if reg != 'all' else "")   # last in the chain
-    return (f"{args.model}_vc{args.vc}_{mode}{val_tag}_nm-{nm}"
+    pre = (f"{args.tag}__" if getattr(args, 'tag', '') else '')
+    return (f"{pre}{args.model}{models_v2.v2_tag(vars(args))}_vc{args.vc}_{mode}{val_tag}_nm-{nm}"
             f"_ws{args.w_spatial:g}-wt{args.w_temporal:g}{rw_tag}_sc-{args.reg_scope}"
             f"_k{args.reg_knn}s{args.reg_time_stride}"
             f"_ebs{eff}_crop{args.crop_len}_ep{args.epochs}{data_tag}")
@@ -214,8 +271,12 @@ def main(args):
         aug_times=args.aug_times, pp_norm=args.pp_norm, tag='exp',
         min_active=min_active, prep_cache=prep_cache, norm_mode=args.norm_mode,
         verbose=True, train_frac=args.train_frac, train_sources=args.train_sources,
-        subsample_seed=args.subsample_seed, train_rng_seed=rng_seed)
+        subsample_seed=args.subsample_seed, train_rng_seed=rng_seed,
+        real_repeat=args.real_repeat, val_source=args.val_source)
     n_keep = info['n_keep']
+    if args.test_limit > 0:
+        ti_ds.samples = ti_ds.samples[:args.test_limit]; te_ds.samples = te_ds.samples[:args.test_limit]
+        print(f"[smoke] test sets truncated to {args.test_limit} recordings each")
 
     # Build the full-recording preprocessing cache upfront (parallel) so the heavy
     # FIR/Savitzky-Golay/notch filtering is paid once, not every epoch. The random
@@ -249,10 +310,13 @@ def main(args):
     ti_loader = dl(ti_ds, False); te_loader = dl(te_ds, False)
 
     # ---- model ----
-    model = models_fixedn.__dict__[args.model](
-        signal_shape=(n_keep, args.crop_len), patch_size=tuple(args.patch_size),
-        pos_mode=args.pos_embed)
+    model = models_v2.build_model(vars(args), n_keep)      # v1 names -> v1 classes, posq_* -> PosQ-MAE
     model.to(device)
+    if args.init_from:
+        ck0 = torch.load(args.init_from, map_location='cpu', weights_only=False)
+        missing, unexpected = model.load_state_dict(ck0['model'], strict=True), None
+        print(f"[init] weights initialised from {args.init_from} (epoch {ck0.get('epoch', '?')}); "
+              f"optimizer and schedule restart")
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
     nparams = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -297,6 +361,9 @@ def main(args):
                  w_spatial=args.w_spatial, w_temporal=args.w_temporal, reg_scope=args.reg_scope,
                  n_train=len(train_ds), n_val=len(val_ds),
                  n_test_internal=len(ti_ds), n_test_external=len(te_ds),
+                 n_sim_train=info.get('n_sim_train', 0), train_sources=args.train_sources,
+                 real_repeat=args.real_repeat, val_source=info.get('val_source', 'real'),
+                 init_from=args.init_from,
                  device=str(device),
                  gpu_name=(torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'))
     epoch_times = []
@@ -417,7 +484,12 @@ def main(args):
             if dd not in sys.path:
                 sys.path.insert(0, dd)
             from report_at_rt import report
-            report(save_dir, splits=('test_internal', 'test_external'))
+            ds_splits = list(getattr(args, 'downstream_splits', None) or [])
+            if 'val' in ds_splits:
+                report(save_dir, splits=('val',), out_json=os.path.join(save_dir, 'at_rt_results_val.json'))
+            tests = tuple(s_ for s_ in ds_splits if s_ != 'val')
+            if tests:
+                report(save_dir, splits=tests)
         except Exception as e:
             print(f"[warn] downstream AT/RT report skipped: {type(e).__name__}: {e}")
 

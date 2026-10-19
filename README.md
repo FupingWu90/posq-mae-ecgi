@@ -1,41 +1,52 @@
-# PPE-MAE: few-electrode electrocardiographic imaging with a physical-position masked autoencoder
+# PosQ-MAE: few-electrode electrocardiographic imaging with a position-queried masked autoencoder
 
-Experiment code for *"Generalisable ECGi Body-Surface Potential Reconstruction in Real-World
-Clinical Recordings with a Physical-Position Masked Autoencoder"*.
+Experiment code for *"Generalisable ECGi Body-Surface Potential Completion in Real-World Clinical
+Recordings with a Position-Queried Masked Autoencoder"*.
 
-A masked autoencoder whose tokens carry a **physical position embedding** (PPE, an MLP of each
-electrode's normalised 3-D coordinates) reconstructs the complete 252-channel body-surface
-potential (BSP) field of an ECGi vest from only *N* visible electrodes selected on the torso
-geometry. A fixed, physics-based Method-of-Fundamental-Solutions (MFS) inverse then recovers the
-epicardial potentials, from which activation time (AT), repolarisation time (RT) and
-activation–recovery interval (ARI) maps are extracted and compared against a clinical reference.
-With *N* = 16 electrodes the reconstruction matches the inverse computed from all valid vest
-electrodes in activation accuracy and surpasses it in repolarisation accuracy on noisy recordings.
+PosQ-MAE completes the full 252-channel body-surface potential (BSP) field of an ECGi vest from
+only *N* measured electrodes. An encoder reads the measured electrodes, each token carrying a
+**physical position embedding** (an MLP of the electrode's normalised 3-D coordinates); a decoder
+reconstructs the signal at any queried torso position by cross-attention to the encoded
+electrodes, and a local sub-token attention head restores the within-patch temporal detail. A
+fixed, physics-based Method-of-Fundamental-Solutions (MFS) inverse then recovers the epicardial
+potentials, from which activation time (AT), repolarisation time (RT) and activation–recovery
+interval (ARI) maps are extracted and compared against a clinical reference. With *N* = 16
+electrodes (a sixteen-fold reduction) the downstream activation-time error stays within 2 ms of the
+inverse computed from all valid vest electrodes, on an internal and on a held-out external cohort.
 
 > **Data are not included.** The recordings are clinical data that cannot be redistributed. All
 > cohort identifiers in this repository are anonymised (`cohortA`, `cohortB` = the two internal
-> sub-cohorts of one centre; `external` = the held-out external centre).
+> sub-cohorts of one centre; `external` = the held-out external centre). Trained weights are not
+> distributed either (see the paper's data and code availability statement).
+
+This release supersedes the PPE-MAE code of the first manuscript version (kept as the `v1`
+predecessor, see *Previous release* below): the model is new (`bsp_reconstruction/models_v2.py`),
+every comparison is made under **two deployment layouts** (a fixed electrode template and
+per-recording k-means placement), and the learned baselines of the paper are the models of the
+previous release re-evaluated under the new protocol.
 
 ## Pipeline and repository layout
 
-The repository follows the three stages of the method, one directory each:
-
 ```
-N visible electrodes  --(1) bsp_reconstruction/-->  full 252-channel BSP field
+N measured electrodes --(1) bsp_reconstruction/-->  full 252-channel BSP field
                       --(2) inverse_evaluation/--->  epicardial potentials -> AT / RT / ARI vs reference
-                      --(3) baselines_analyses/--->  classical & linear baselines, robustness analyses
+                      --(3) baselines_analyses/--->  classical & learned baselines, robustness and clinical analyses
+                          simulation/           ->  surface-source simulated recordings (ground-truth experiments)
+                          training_sweeps/      ->  registry and drivers of every training run of the paper
 ```
 
 | Directory | Stage | Contents |
 |---|---|---|
-| `bsp_reconstruction/` | 1 — reconstruct the body-surface field | `train.py` (single training/evaluation entry point), `models_mae.py` (PPE-MAE backbone: `PhysicalPosEmbed`, `IndexPosEmbed` ablation), `models_fixedn.py` (fixed-*N* reconstruction model, size factories, losses), `models_mcma.py` (convolutional baseline), `channel_select.py` (greedy / k-means / patch / random selection, optional front/back torso restriction), `dataset.py`, `preprocess.py`, `detect_missing.py`, `torso_loader.py`, `engine.py`, `viz_usage.py` |
-| `inverse_evaluation/` | 2 — inverse problem and downstream metrics | `mfs.py` + `inverse.py` (MFS, Tikhonov, floored L-curve; `calibration.json` = deployed hyper-parameters), `at_rt.py` (Wyatt AT/RT/ARI with vertex gating), `build_sources.py` (the compared BSP fields), `eval_downstream.py` (per-recording metrics), `report_at_rt.py` (cohort aggregates), `cache_references.py`, `calibrate_inverse.py`, `heart_coords.py` (patient-independent epicardial coordinates), `spatial_maps.py`, deployment-matrix and diagnostic scripts, `cache_hsp/*.sh` cache drivers |
-| `baselines_analyses/` | 3 — baselines and analyses | `lmmse_baseline.py` (population linear-MMSE), `interp_baseline.py` (Laplacian / thin-plate-spline completion), `lam_recal.py` (per-*N* regularisation re-calibration of the raw inverse), `fidelity_baselines.py` (BSP/HSP fidelity of the classical completions), `layout_shift_test.py` (electrode-layout-shift stress test, PPE vs index embedding), `dense_field_test.py` (continuous-field decoding at arbitrary torso points), `seed_robustness.py` (deployment-selection seed robustness), shard drivers `run_*.sh`, `common.py` |
-| `training_sweeps/` | training configurations | Serial single-GPU sweep drivers (selection mode, regularisation, width/depth, electrode count, data scaling, learned baselines, training seeds, front/back-restricted selection); idempotent, resume from the last checkpoint |
-| `run.sh` | | Minimal training launcher |
+| `bsp_reconstruction/` | 1 — complete the body-surface field | `train.py` (single training/evaluation entry point; v1 and v2 models), `models_v2.py` (**PosQ-MAE**: position-queried cross-attention decoder, sub-token output head, tokenizer / masking / interaction variants, `complete_at()` for arbitrary query positions, `build_model()`), `models_mae.py` + `models_fixedn.py` (v1 PPE-MAE backbone and fixed-*N* model, kept as the learned baseline and as the encoder of PosQ-MAE), `models_mcma.py` (convolutional baseline), `channel_select.py` (greedy / k-means / patch / random selection and the fixed **template** layout with nearest-available substitution), `templates/` (the fixed deployment layouts for *N* = 4 … 64, built by `build_templates.py` from the mean training-set electrode geometry), `dataset.py`, `preprocess.py`, `detect_missing.py`, `torso_loader.py`, `engine.py`, `paths.py`, `viz_usage.py` |
+| `inverse_evaluation/` | 2 — inverse problem and downstream metrics | `mfs.py` + `inverse.py` (MFS, Tikhonov, floored L-curve; `calibration.json` = deployed hyper-parameters), `at_rt.py` (Wyatt AT/RT/ARI with vertex gating), `build_sources.py` (the compared BSP fields), `eval_downstream.py` (per-recording metrics under a chosen layout: `--mode template` or `--mode cluster --cluster_method kmean`), `at_maps.py` (per-vertex AT/RT maps), `report_at_rt.py` (cohort aggregates), `cache_references.py`, `calibrate_inverse.py`, `eval_sim_gt.py` (ground-truth evaluation on simulated recordings), `heart_coords.py`, `spatial_maps.py`, deployment-matrix and diagnostic scripts |
+| `simulation/` | surface-source simulation | `simcore.py` (equivalent-double-layer epicardial source, eikonal activation scenarios, solid-angle forward model with a bounded-torso BEM correction), `noise.py` (beat tiling, gain calibration, missing-channel fingerprints, noise), `make_dataset.py` (writes vendor-format recordings plus ground truth) |
+| `baselines_analyses/` | 3 — baselines and analyses | `classical_baselines_template.py` (Laplacian / thin-plate-spline / population linear-MMSE completion under a chosen layout), `lam_recal_v2.py` (per-*N* regularisation re-calibration of the raw inverse), `dense_field_v2.py` (continuous-field decoding at arbitrary torso points), `layout_shift_v2.py` (layout-shift stress test, physical positions vs index embedding), `index_jitter_v2.py`, `deploy_robustness.py` and `region_deploy_v2.py` (deployment-layout and half-torso robustness), `patient_level_stats.py` and `patient_ids.py` (patient-level paired tests), `activation_site_error.py` (earliest/latest-activation localisation endpoint), `plausibility.py` (reference-free conduction-velocity plausibility), `gate_sens.py`, `compare_pilots.py` / `compare_pilots_val.py` (paired per-recording tests between runs), `val_engine_metrics.py`, `test_engine_metrics.py`, `pilot_metrics.py`, `baselines_two_layouts.py`, `compare_classical_layouts.py`, `results_v2.py` (the main comparison tables: cohort means and paired Wilcoxon tests of every method under both layouts), `cpu_timing.py`, `infer_time_idle.py`, `bench_variants.py`, cross-attention and query-interaction diagnostics, adoption-gate and parity checks, unit tests (`test_models_v2.py`, `test_attention_modules.py`, `test_pilot_logic.py`) |
+| `training_sweeps/` | training configurations | `pilots.py` (registry of the architecture pilots and the rules of the unattended queue) and `phase3.py` (registry of the final-configuration runs: electrode counts, seeds, index embedding, data scaling, selection modes, half-torso training, simulation); `run_queue.sh` / `run_phase3.sh` (serial single-GPU queues, idempotent, resume from the last checkpoint); evaluation drivers for both deployment layouts (`eval_test_runs.sh`, `val_percase.sh`, `follow_*.sh`), for the baselines (`eval_baselines_template.sh`, `eval_classical_template.sh`, `build_template_vc_cache.sh`) and for the analyses (`run_*.sh`, `extract_atmaps.sh`, `eval_region_runs.sh`, `eval_sim_gt_runs.sh`); the recorded automatic decisions of the queue (`*_decision.json`, `final_epochs.json`) |
+| `results/v1_reference/` | | Aggregate reference numbers of the previous release's final model under the new protocol (validation completion error under both layouts, convergence, template-substitution statistics), used by the adoption rules of the pilot queue and by the fairness checks; regenerated by `baselines_analyses/v1_reference.py` |
+| `run.sh` | | Launcher of the final configuration |
 
-Generated artefacts (`runs/`, `cache/`, `inverse_evaluation/cache_hsp/*/`,
-`inverse_evaluation/spatial_out/`, `baselines_analyses/generated/`, `figures/`) are git-ignored.
+Generated artefacts (`runs/`, `cache/`, `data/`, `results/`, `figures/`, `inverse_evaluation/cache_hsp/*/`,
+`baselines_analyses/generated/`, `training_sweeps/logs/`) are git-ignored.
 
 ## Installation
 
@@ -60,8 +71,10 @@ Patients are directories; cohort roots are configured with environment variables
 export ECGI_COHORT_A_ROOT=/path/to/cohortA    # internal sub-cohort A  (training only)
 export ECGI_COHORT_B_ROOT=/path/to/cohortB    # internal sub-cohort B  (train / val / internal test)
 export ECGI_EXTERNAL_ROOT=/path/to/external   # external centre       (test only)
+export ECGI_SIM_ROOT=/path/to/sim             # optional: simulated cohort written by simulation/make_dataset.py
 export ECGI_CACHE_DIR=/path/to/cache          # optional: preprocessing + missing-mask cache
 export ECGI_FIG_DIR=/path/to/figures          # optional: where diagnostic plots are written
+export ECGI_V1_ROOT=/path/to/previous-release # optional: checkout of the v1 release (learned baselines, see below)
 ```
 
 `bsp_reconstruction/dataset.py::collect_split` builds the patient-level split (seed 42): cohort
@@ -71,48 +84,82 @@ gain-invariant criteria (`detect_missing.py`) and cached; the 4 geometry-less pa
 are dropped globally (256 → 252). Patient directory names become part of the recording
 identifiers, so keep them pseudonymous.
 
-## Stage 1 — training the reconstruction model
+## Stage 1 — training the completion model
 
-The final configuration (greedy farthest-point selection during training, k-means medoid
-selection at validation/deployment, temporal-smoothness weight 3 with a 100-epoch warm-up,
-"wide" backbone, effective batch 64, 800 epochs):
+The final configuration (PosQ-MAE "wide": 6 encoder blocks, 3 cross-attention decoder blocks of
+width 128 with 16 heads, sub-token attention head with 5-sample sub-tokens of width 32, greedy
+farthest-point electrode selection during training, the fixed template layout for checkpoint
+selection, temporal-smoothness weight 3 with a 100-epoch warm-up, effective batch 64, 800 epochs):
 
 ```bash
 cd bsp_reconstruction
-python train.py --model fixedn_ecgi_wide --batch_size 32 --accum_iter 2 --patch_size 1 50 \
-  --vc 16 --norm_mode global --w_spatial 0 --w_temporal 3 --reg_warmup_epochs 100 --reg_scope recon \
-  --select_mode cluster --cluster_method greedy --val_select_mode cluster --val_cluster_method kmean \
-  --aug_times 1 --epochs 800 --use_amp --num_workers 8 --save_every 40 --eval_every 20
+python train.py --tag FINAL --model posq_ecgi_wide --head subattn --inner_depth 1 --sub_len 5 --inner_dim 32 \
+  --batch_size 32 --accum_iter 2 --patch_size 1 50 --vc 16 --norm_mode global \
+  --w_spatial 0 --w_temporal 3 --reg_warmup_epochs 100 --reg_scope recon \
+  --select_mode cluster --cluster_method greedy --val_select_mode template \
+  --aug_times 1 --epochs 800 --use_amp --num_workers 8 --save_every 40 --eval_every 20 --downstream_splits val
 ```
 
-Useful flags: `--vc N` (number of visible electrodes), `--pos_embed {ppe,index}` (physical vs
-ST-MEM-style index embedding), `--model mcma_unet` (convolutional baseline), `--select_region
-{all,front,back}` (restrict the visible-electrode candidates to one torso half, training and
-deployment alike), `--train_frac` / `--train_sources` (data-scaling experiments), `--rng_seed`
-(training-only randomness; `--seed` fixes the patient split and the deployment selection and
-should stay at 42). Run directories are named from the configuration
-(`runs/data-cohortA+cohortB_vs_external/<model>_vc<N>_...`) and contain `args.json`,
-`checkpoints/`, `test_compare.json` (BSP metrics under all selection modes) and, after the
-automatic stage-2 evaluation, `at_rt_results.json`.
+(`run.sh` runs exactly this.) Useful flags: `--vc N` (number of measured electrodes),
+`--pos_embed {ppe,index}` (physical position embedding vs an ST-MEM-style channel-index
+embedding on the same backbone), `--head {linear,subattn,convref}`, `--tokenizer {linear,tnt,conv}`,
+`--dec_tsa` / `--dec_ssa` (query interaction along time / across electrodes), `--dec_depth`,
+`--dec_dim`, `--dec_heads`, `--enc_depth` (capacity), `--tmask_mode` (mixed masking),
+`--query_frac` (fraction of the hidden electrodes decoded per step), `--time_embed`,
+`--select_mode {cluster,patch,random,template}` with `--cluster_method {greedy,kmean}` (training-time
+selection), `--val_select_mode` (layout used for checkpoint selection), `--select_region
+{all,front,back}` (restrict the candidates to one torso half), `--train_frac` / `--train_sources`
+(data scaling; `sim`, `sim+both` for the simulation experiments), `--init_from` (initialise from a
+simulation-pretrained checkpoint), `--rng_seed` (training-only randomness; `--seed` fixes the
+patient split and the deployment selection and should stay at 42), `--model fixedn_ecgi_wide`
+(the v1 PPE-MAE model) and `--model mcma_unet` (convolutional baseline). Run directories are named
+from the configuration (`runs/data-cohortA+cohortB_vs_external/<tag>__<model>_vc<N>_...`) and
+contain `args.json`, `checkpoints/`, `test_compare.json` (held-out BSP metrics under every
+selection mode, including the fixed template) and the downstream results of the requested splits.
+
+**Deployment layouts.** Every model is evaluated under (i) the fixed template layout
+(`bsp_reconstruction/templates/template_vc<N>.npz`: k-means medoids of the mean normalised
+electrode positions of the training geometries, with nearest-available substitution of missing
+template electrodes) and (ii) per-recording k-means placement on the valid electrodes of each
+recording. `python bsp_reconstruction/build_templates.py` rebuilds the templates from the training
+split.
+
+**Experiment registry.** `training_sweeps/pilots.py` lists the architecture pilots (all trained on
+top of the final training recipe; decided on the validation split under both layouts): the base
+query decoder (DEC1), decoder heads (DECH), temporal self-attention among the queries (DEC2),
+tokenizers (LOC1 conv, LOC2 sub-token self-attention), output heads (LOC3 sub-token attention =
+final, LOC3B convolutional refinement, LOC3D two sub-token blocks), smoothness-loss ablations
+(LOC4 w_t = 0, LOC5 w_t = 1), mixed masking (MSK1, MSK3), learned time embedding (EMB1), query
+fraction (DEC4), schedule (EPL3) and capacity (CAPE, CAPD, CAPW). `training_sweeps/phase3.py`
+lists the runs of the final configuration: electrode counts 4–64 (P3N4 … P3N64), query
+interaction (P3INT1–3), training seeds (P3S43, P3S44), index embedding × 3 seeds (P3IDX42–44),
+training-set fractions 1/2, 1/4, 1/8 (P3TF05, P3TF025, P3TF0125), training-time selection modes
+(P3SELKM, P3SELPT, P3SELRD), half-torso training (P3REGF, P3REGB) and the simulation group
+(P3SIM, P3SIM2R, P3SIMR, P3FT05/025/0125). `python training_sweeps/phase3.py next` prints the next
+command of the queue; `run_phase3.sh` runs it unattended.
 
 ## Stage 2 — inverse problem and AT/RT evaluation
 
 ```bash
-cd inverse_evaluation
 # (once) model-independent references: all-valid inverse + commercial map, per split
-python cache_references.py --run_dir <run_dir> --split test_internal
-python cache_references.py --run_dir <run_dir> --split test_external
-# cohort aggregates (mean/median AT, RT, ARI, HSP metrics; deploy selection = k-means)
-python report_at_rt.py --run_dir <run_dir>
-# per-recording CSV for paired tests (--region front|back restricts the deployment selection)
-python eval_downstream.py --run_dir <run_dir> --n 1000000 --vc 16 --mode cluster --cluster_method kmean \
-    --split test_internal --out ../baselines_analyses/generated/vc_percase/vc16_test_internal.csv
-# re-calibrate the inverse (alpha_in, alpha_out, lambda floor) on the validation split
-python calibrate_inverse.py --run_dir <run_dir>
+python inverse_evaluation/cache_references.py --run_dir <run_dir> --split test_internal
+python inverse_evaluation/cache_references.py --run_dir <run_dir> --split test_external
+# raw N-electrode inverse under the fixed template layout, every N (CPU)
+bash training_sweeps/build_template_vc_cache.sh
+# per-recording downstream metrics of a run on both test cohorts under both layouts
+bash training_sweeps/eval_test_runs.sh FINAL          # -> baselines_analyses/generated/percase_candidate/<ID>_vc<N>_<split>_<layout>.csv
+# the same for the validation recordings, and the held-out completion error under both layouts
+LAYOUT=template bash training_sweeps/val_percase.sh FINAL; LAYOUT=kmeans bash training_sweeps/val_percase.sh FINAL
+python baselines_analyses/val_engine_metrics.py --run_dir <run_dir>
+# paired per-recording tests between runs (commercial and all-valid references)
+python baselines_analyses/compare_pilots.py --split test_internal --layout template FINAL P3IDX42
+# cohort aggregates / re-calibration of the inverse (alpha_in, alpha_out, lambda floor) on the validation split
+python inverse_evaluation/report_at_rt.py --run_dir <run_dir>
+python inverse_evaluation/calibrate_inverse.py --run_dir <run_dir>
 ```
 
-Every method (reconstruction, raw *N*-electrode inverse, Laplacian / thin-plate-spline
-interpolation, LMMSE, all-valid inverse) passes through the identical MFS operator; AT is scored
+Every method (completion, raw *N*-electrode inverse, Laplacian / thin-plate-spline interpolation,
+LMMSE, all-valid inverse, learned baselines) passes through the identical MFS operator; AT is scored
 on QRS-usable and RT/ARI on T-usable vertices defined from the reference field, so all methods
 are compared on identical vertex sets (`at_rt.py`, `eval_downstream.py`). Epicardial quantities
 live on the vendor's ventricular mesh; `heart_coords.py` maps every heart onto a common
@@ -121,30 +168,52 @@ live on the vendor's ventricular mesh; `heart_coords.py` maps every heart onto a
 ## Stage 3 — baselines and analyses
 
 ```bash
-cd baselines_analyses
-./run_vc_percase.sh                                   # per-recording metrics for every N
-./run_interp_shards.sh                                # Laplacian / TPS completion
-./run_lmmse.sh                                        # linear-MMSE completion (fit, calibrate, evaluate)
-./run_lam_recal.sh                                    # per-N lambda floor for the raw inverse
-python fidelity_baselines.py --split test_internal --shard 0 --nshards 4   # ... then --summary
-python layout_shift_test.py                           # layout-shift stress test (PPE vs index)
-python dense_field_test.py --sanity; python dense_field_test.py --calibrate; python dense_field_test.py --eval --split test_internal; python dense_field_test.py --summary
-python seed_robustness.py --n 80 --seeds 42 7 123     # deployment-selection seed robustness
+bash training_sweeps/eval_classical_template.sh         # Laplacian / TPS / LMMSE completion under the template layout
+bash training_sweeps/eval_baselines_template.sh         # learned baselines of the previous release under the template layout
+bash training_sweeps/run_lam_recal.sh                   # per-N lambda floor for the raw inverse
+bash training_sweeps/run_dense_field.sh                 # continuous-field decoding at arbitrary torso points
+bash training_sweeps/run_deploy_robustness.sh           # deployment-layout robustness + half-torso deployment
+bash training_sweeps/eval_region_runs.sh P3REGF P3REGB  # half-torso-trained models under both protocols
+python baselines_analyses/layout_shift_v2.py            # layout-shift stress test (physical positions vs index embedding)
+python baselines_analyses/index_jitter_v2.py            # index-slot jitter vs the per-recording advantage of the position code
+bash training_sweeps/extract_atmaps.sh FINAL; python baselines_analyses/plausibility.py --id FINAL   # per-vertex maps, conduction-velocity plausibility
+python baselines_analyses/patient_level_stats.py        # patient-level paired tests
+python baselines_analyses/activation_site_error.py --id FINAL   # earliest / latest-activation localisation endpoint
+python baselines_analyses/gate_sens.py                  # vertex-gating sensitivity
+python baselines_analyses/cpu_timing.py --run_dir <run_dir> --threads 1   # single-core CPU completion time
 ```
 
-The drivers in `training_sweeps/` document every training configuration used (selection modes,
-regularisation, architecture width/depth, electrode counts 4–64, training-set fractions,
-learned baselines, training seeds, front/back-restricted training).
+Simulation (ground-truth experiments): `python simulation/make_dataset.py` writes the simulated
+cohort under `ECGI_SIM_ROOT`; the P3SIM* entries of `training_sweeps/phase3.py` train on it and
+`bash training_sweeps/eval_sim_gt_runs.sh` scores every model against the simulated ground truth
+under both layouts (`inverse_evaluation/eval_sim_gt.py`).
+
+The cohort clinical-characteristics table and the stratified analyses by acquisition state and QRS
+duration were derived from the study case-report tables, which are patient data; the scripts that
+read them are not distributed. They operate on the per-recording CSVs produced above.
+
+## Previous release
+
+The learned baselines of the paper (the v1 PPE-MAE model, the ST-MEM-style index-embedding model and
+the convolutional MCMA model) and the k-means-layout results of the classical completions are the
+frozen artefacts of the first release of this repository, re-evaluated under the new protocol.
+`bsp_reconstruction/paths.py` reads them from `ECGI_V1_ROOT` (default `<repo>/v1`): a checkout of
+that release with its `runs/`, `cache/`, `inverse_evaluation/cache_hsp/` and
+`baselines_analyses/generated/`. All v1 models can also be retrained from this repository
+(`--model fixedn_ecgi_wide`, `--pos_embed index`, `--model mcma_unet`; the drivers of the first
+release list their configurations).
 
 ## Notes
 
 * Amplitude normalisation is a single ratio-preserving per-recording scale computed from the
-  visible electrodes only (`bsp_reconstruction/dataset.py`, `engine.py`), so that reconstructed
+  measured electrodes only (`bsp_reconstruction/dataset.py`, `engine.py`), so that completed
   fields keep physically meaningful inter-channel amplitude ratios for the inverse problem.
-* Channels without a registered position are never selected as visible inputs and never enter
-  the inverse; they are still reconstructed through a learned "unknown-position" embedding.
+* Channels without a registered position are never selected as inputs and never enter the inverse;
+  they are still completed through a learned "unknown-position" embedding.
 * The vendor file parsers (`bsp_reconstruction/torso_loader.py`, `inverse_evaluation/mesh_io.py`)
   read the XML geometry exports of the acquisition system; adapt them for other formats.
+* The template layouts in `bsp_reconstruction/templates/` are aggregates (mean electrode geometry of
+  the training vest fits, k-means medoid indices); they contain no patient-specific information.
 
 ## Citation
 

@@ -4,9 +4,8 @@ HSP/AT/RT ranking is consistent with the CC/BSP-based model selection.
 """
 import os, json, glob
 import numpy as np
-_PROJ = os.environ.get('ECGI_PROJECT_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-RUNS = _PROJ + "/runs/data-cohortA+cohortB_vs_external"
+RUNS = os.path.join(os.environ.get("ECGI_V1_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "v1")), "runs", "data-cohortA+cohortB_vs_external")
 MODELS = ['cluster-greedy', 'cluster-kmean', 'patch', 'random']
 
 

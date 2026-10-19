@@ -7,9 +7,8 @@ next to the model's own at_rt_results.json.
 """
 import os, csv, json, glob
 import numpy as np
-_PROJ = os.environ.get('ECGI_PROJECT_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-RUNS = _PROJ + "/runs/data-cohortA+cohortB_vs_external"
+RUNS = os.path.join(os.environ.get("ECGI_V1_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "v1")), "runs", "data-cohortA+cohortB_vs_external")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'out_matrix')
 SPLITS = ['test_internal', 'test_external']
 SOURCES = ['src1_vc', 'src3_recon_whole', 'src4_recon_valid']

@@ -54,9 +54,10 @@ no per-step GPU synchronisation, and the same code serves train / val / test.
 Selection is capped at the number of candidate channels and always leaves at
 least one active channel to reconstruct (so the loss is never empty).
 """
+import os
 import numpy as np
 
-MODES = ('cluster', 'patch', 'random')
+MODES = ('cluster', 'patch', 'random', 'template')
 CLUSTER_METHODS = ('greedy', 'kmean')
 REGIONS = ('all', 'front', 'back')
 
@@ -88,6 +89,55 @@ def region_mask(coords, region='all'):
     ok = _coord_valid(coords)
     ap = ANT_SIGN * np.asarray(coords)[:, AP_AXIS]
     return ok & ((ap > 0) if region == 'front' else (ap <= 0))
+
+
+# --------------------------------------------------------------------------- #
+# v2: FIXED, PREDETERMINED deployment layout ('template' mode)
+# --------------------------------------------------------------------------- #
+# One electrode layout per electrode count, shared by every patient: the k-means
+# medoids (k = vc) of the MEAN normalised electrode positions of the training
+# geometries (bsp_reconstruction/build_templates.py -> bsp_reconstruction/templates/template_vc<N>.npz).
+# A template electrode that is missing or unregistered in a recording is replaced
+# by the nearest available electrode (active, registered, not yet used). The mode
+# is deterministic and consumes no RNG.
+_TEMPLATES = {}
+_TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+
+
+def load_template(vc):
+    """(idx (vc,) int64 into the kept channels, mean_xyz (C,3) float32)."""
+    vc = int(vc)
+    if vc not in _TEMPLATES:
+        with np.load(os.path.join(_TEMPLATE_DIR, f'template_vc{vc}.npz')) as z:
+            _TEMPLATES[vc] = (z['idx'].astype(np.int64), z['mean_xyz'].astype(np.float32))
+    return _TEMPLATES[vc]
+
+
+def template_select(coords, active_mask, vc, k=None):
+    """Visible mask of the fixed template layout for one recording.
+    Returns (visible (C,) bool, n_substituted)."""
+    idx, mean_xyz = load_template(vc)
+    C = coords.shape[0]
+    assert mean_xyz.shape[0] == C, f'template built for {mean_xyz.shape[0]} channels, got {C}'
+    reg = _coord_valid(coords)
+    avail = np.asarray(active_mask, bool) & reg
+    vis = np.zeros(C, dtype=bool)
+    nsub = 0
+    kmax = len(idx) if k is None else int(k)
+    for c in idx:
+        if int(vis.sum()) >= kmax:
+            break
+        if avail[c] and not vis[c]:
+            vis[c] = True
+            continue
+        target = coords[c] if reg[c] else mean_xyz[c]
+        d = np.linalg.norm(coords - target, axis=1)
+        d[~avail | vis] = np.inf
+        j = int(np.argmin(d))
+        if np.isfinite(d[j]):
+            vis[j] = True
+            nsub += 1
+    return vis, nsub
 
 
 def select_visible_channels(coords, active_mask, vc, mode='cluster',
@@ -135,7 +185,7 @@ def select_visible_channels(coords, active_mask, vc, mode='cluster',
 
     C = coords.shape[0]
     visible = np.zeros(C, dtype=bool)
-    info = {'n_region_cand': None, 'n_region_fallback': 0}
+    info = {'n_region_cand': None, 'n_region_fallback': 0, 'n_template_sub': 0}
     _ret = (lambda v: (v, info)) if return_info else (lambda v: v)
 
     coord_ok = _coord_valid(coords)
@@ -148,6 +198,18 @@ def select_visible_channels(coords, active_mask, vc, mode='cluster',
     # Exactly k visible; leave >=1 active channel to reconstruct when possible.
     k = min(int(vc), n_active - 1) if n_active > 1 else 1
     k = max(1, k)
+
+    # TEMPLATE (v2): fixed predetermined layout, nearest-available substitution.
+    if mode == 'template':
+        if region != 'all':
+            raise ValueError("mode='template' supports region='all' only")
+        visible, nsub = template_select(coords, active_mask, vc, k=k)
+        info['n_template_sub'] = int(nsub)
+        short = k - int(visible.sum())
+        if short > 0 and len(fill) > 0:   # last resort: coordinate-less active channels
+            add = rng.choice(len(fill), size=min(short, len(fill)), replace=False)
+            visible[fill[add]] = True
+        return _ret(visible)
 
     # REGION restriction: candidates = active & registered & in-region. If the
     # region holds fewer than k, take all of them plus the nearest out-of-region

@@ -15,11 +15,10 @@ from build_sources import build_context, CROP
 from inverse import assemble_solver, solve_from_field, load_commercial
 from at_rt import extract_sample, good_vertex_mask, detect_beats
 from dataset import collect_split
-_PROJ = os.environ.get('ECGI_PROJECT_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings('ignore')
 
 RUN = sys.argv[1] if len(sys.argv) > 1 else \
-    _PROJ + '/runs/data-cohortA+cohortB_vs_external/fixedn_ecgi_base_vc16_cluster-greedy_nm-gl_ws0-wt0_sc-recon_k6s10_ebs64_crop5000_ep800'
+    os.path.join(os.environ.get("ECGI_V1_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "v1")), "runs", "data-cohortA+cohortB_vs_external", "fixedn_ecgi_base_vc16_cluster-greedy_nm-gl_ws0-wt0_sc-recon_k6s10_ebs64_crop5000_ep800")
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'validate_out', 'diag_atrt')
 os.makedirs(OUT, exist_ok=True)

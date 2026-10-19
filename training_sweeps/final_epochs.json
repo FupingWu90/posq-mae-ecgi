@@ -1,0 +1,9 @@
+{
+ "epochs": 800,
+ "epl3_minus_loc3_val_mae": {
+  "template": 0.0029119999999999147,
+  "kmeans": 0.006362456055182375
+ },
+ "at_not_worse_both_layouts": true,
+ "reason": "EPL3 not better than LOC3 by > 0.002 under both layouts (or AT worse) -> 800 epochs kept"
+}

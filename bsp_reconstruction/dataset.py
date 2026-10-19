@@ -41,15 +41,21 @@ MIN_LEN  = 5000
 NCH_RAW  = 256
 
 # Cohort roots: one sub-directory per patient holding the vendor exports
-# (*.ecgdata, .torso, .heart, .valve, .potential). Override with env vars.
+# (*.ecgdata, .torso, .heart, .valve, .potential).  Override with environment variables.
 _PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COHORT_A_ROOT = os.environ.get("ECGI_COHORT_A_ROOT", os.path.join(_PROJ, "data", "cohortA"))   # internal sub-cohort A (train only)
-COHORT_B_ROOT    = os.environ.get("ECGI_COHORT_B_ROOT", os.path.join(_PROJ, "data", "cohortB"))   # internal sub-cohort B (train/val/test_internal)
-EXTERNAL_ROOT  = os.environ.get("ECGI_EXTERNAL_ROOT", os.path.join(_PROJ, "data", "external")) # external test cohort
-COHORT_B_SPLIT   = (19, 5, 13)   # train / val / test patients (sums to 37)
+COHORT_B_ROOT = os.environ.get("ECGI_COHORT_B_ROOT", os.path.join(_PROJ, "data", "cohortB"))   # internal sub-cohort B (train / val / test_internal)
+EXTERNAL_ROOT = os.environ.get("ECGI_EXTERNAL_ROOT", os.path.join(_PROJ, "data", "external"))  # external test cohort
+# Simulated cohort (simulation/make_dataset.py): <SIM_ROOT>/{train,val,test}/<cohort>-<patient>/CI/*.ecgdata
+SIM_ROOT = os.environ.get("ECGI_SIM_ROOT", os.path.join(_PROJ, "data", "sim"))
+COHORT_B_SPLIT = (19, 5, 13)   # train / val / test patients (sums to 37)
 
-CACHE_DIR = os.environ.get("ECGI_CACHE_DIR", os.path.join(_PROJ, "cache"))
-PREP_CACHE_DIR = os.path.join(CACHE_DIR, "prep")   # cached FULL preprocessed recordings
+# v2: caches are READ from the frozen v1 tree when present and WRITTEN only under the
+# v2 workspace (paths.py). Keys are unchanged, so every v1 entry is reused as is.
+from paths import V1_CACHE_DIR, V2_CACHE_DIR, assert_v2
+CACHE_DIR = V2_CACHE_DIR
+PREP_CACHE_DIR = os.path.join(CACHE_DIR, "prep")   # cached FULL preprocessed recordings (new entries)
+V1_PREP_CACHE_DIR = os.path.join(V1_CACHE_DIR, "prep")   # read-only
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +118,8 @@ def _ecgfiles(pdir, scope):
 def collect_split(seed=42):
     """role -> list of (sample_id, filepath, torso_path); roles:
     'train','val','test_internal','test_external'. Returns (buckets, cohortB_assign)."""
-    buckets = {'train': [], 'val': [], 'test_internal': [], 'test_external': []}
+    buckets = {'train': [], 'val': [], 'test_internal': [], 'test_external': [],
+               'sim_train': [], 'sim_val': [], 'sim_test': []}
     seen = set()
 
     def add(role, root_tag, pdir, scope):
@@ -141,6 +148,13 @@ def collect_split(seed=42):
 
     for p in _patient_dirs(EXTERNAL_ROOT):
         add('test_external', 'external', os.path.join(EXTERNAL_ROOT, p), 'CI')
+
+    # simulated cohort (optional): sample ids 'sim__<cohort>-<patient>__<stem>'
+    for split in ('train', 'val', 'test'):
+        root = os.path.join(SIM_ROOT, split)
+        if os.path.isdir(root):
+            for p in _patient_dirs(root):
+                add(f'sim_{split}', 'sim', os.path.join(root, p), 'CI')
 
     return buckets, dict(cohortB_train=cohortB_train, cohortB_val=cohortB_val, cohortB_test=cohortB_test)
 
@@ -195,24 +209,36 @@ def geometry_union(samples):
 # --------------------------------------------------------------------------- #
 # Per-file missing-mask precompute (disk cached; identical to the predecessor codebase)
 # --------------------------------------------------------------------------- #
-def _cache_path(keep_idx, tag):
+def _content_key(fpath):
+    """Cache key of a recording: the real path, plus mtime+size for files under
+    SIM_ROOT (simulated recordings are regenerated in place, so a path-only key
+    would serve stale masks / preprocessed signals)."""
+    rp = os.path.realpath(fpath)
+    if rp.startswith(os.path.realpath(SIM_ROOT)):
+        st = os.stat(rp)
+        return f"{rp}|{st.st_mtime_ns}|{st.st_size}"
+    return rp
+
+
+def _cache_path(keep_idx, tag, root=None):
     h = hashlib.md5(keep_idx.tobytes()).hexdigest()[:8]
-    return os.path.join(CACHE_DIR, f"missing_masks_{tag}_keep{len(keep_idx)}_{h}.pkl")
+    return os.path.join(root or CACHE_DIR, f"missing_masks_{tag}_keep{len(keep_idx)}_{h}.pkl")
 
 
 def precompute_masks(all_samples, keep_idx, tag='exp', verbose=True):
     os.makedirs(CACHE_DIR, exist_ok=True)
-    cpath = _cache_path(keep_idx, tag)
+    cpath = _cache_path(keep_idx, tag)                       # v2 (written when new masks appear)
+    rpath = cpath if os.path.exists(cpath) else _cache_path(keep_idx, tag, V1_CACHE_DIR)   # else read v1
     cache = {}
-    if os.path.exists(cpath):
+    if os.path.exists(rpath):
         try:
-            with open(cpath, 'rb') as f:
+            with open(rpath, 'rb') as f:
                 cache = pickle.load(f)
         except Exception:
             cache = {}
     masks = {}; n_new = 0
     for i, (sid, fp, tp) in enumerate(all_samples):
-        rp = os.path.realpath(fp)
+        rp = _content_key(fp)
         if rp in cache:
             masks[fp] = cache[rp]; continue
         ecg = _read_ecgdata(fp)
@@ -226,12 +252,12 @@ def precompute_masks(all_samples, keep_idx, tag='exp', verbose=True):
             print(f"  [precompute_masks] {i}/{len(all_samples)} (new={n_new})", flush=True)
     if n_new:
         try:
-            with open(cpath, 'wb') as f:
+            with open(assert_v2(cpath), 'wb') as f:
                 pickle.dump(cache, f)
         except Exception as e:
             print(f"  [precompute_masks] cache save failed: {e}")
     if verbose:
-        print(f"  [precompute_masks] {len(masks)} files, {n_new} newly computed, cache={cpath}")
+        print(f"  [precompute_masks] {len(masks)} files, {n_new} newly computed, cache={rpath if not n_new else cpath}")
     return masks
 
 
@@ -256,11 +282,26 @@ def _normalize(ecg, missing_mask):
 # --------------------------------------------------------------------------- #
 # Full-recording preprocessing cache (filter once, crop per-epoch after)
 # --------------------------------------------------------------------------- #
-def _prep_cache_path(fpath, keep_idx, missing_mask):
-    key = (os.path.realpath(fpath).encode()
+def _prep_cache_name(fpath, keep_idx, missing_mask):
+    key = (_content_key(fpath).encode()
            + np.asarray(keep_idx).tobytes()
            + np.asarray(missing_mask, dtype=bool).tobytes())
-    return os.path.join(PREP_CACHE_DIR, hashlib.md5(key).hexdigest() + '.npy')
+    return hashlib.md5(key).hexdigest() + '.npy'
+
+
+def _prep_cache_path(fpath, keep_idx, missing_mask):
+    """Path a NEW cache entry is written to (v2 workspace)."""
+    return os.path.join(PREP_CACHE_DIR, _prep_cache_name(fpath, keep_idx, missing_mask))
+
+
+def _prep_existing(fpath, keep_idx, missing_mask):
+    """Existing cache entry (v2 first, then the read-only v1 cache) or None."""
+    name = _prep_cache_name(fpath, keep_idx, missing_mask)
+    for root in (PREP_CACHE_DIR, V1_PREP_CACHE_DIR):
+        p = os.path.join(root, name)
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def _build_one_prep(task):
@@ -268,9 +309,9 @@ def _build_one_prep(task):
     Returns 1 if newly written, 0 if already present. Module-level so it is
     picklable for multiprocessing."""
     fpath, keep_idx, mask = task
-    path = _prep_cache_path(fpath, keep_idx, mask)
-    if os.path.exists(path):
+    if _prep_existing(fpath, keep_idx, mask) is not None:
         return 0
+    path = assert_v2(_prep_cache_path(fpath, keep_idx, mask))
     raw = _read_ecgdata(fpath)
     if raw is None:
         prep = np.zeros((len(keep_idx), MIN_LEN), np.float32)
@@ -365,12 +406,13 @@ class ECGiDataset(Dataset):
         """Return the FULL preprocessed recording (n_keep, L), from disk cache if
         present, else compute it, cache atomically, and return it. Cropping and
         normalization happen in __getitem__ AFTER this."""
-        path = self._prep_path(fpath, missing_mask)
-        if os.path.exists(path):
+        hit = _prep_existing(fpath, self.keep_idx, missing_mask)
+        if hit is not None:
             try:
-                return np.load(path, mmap_mode='r')
+                return np.load(hit, mmap_mode='r')
             except Exception:
                 pass
+        path = assert_v2(self._prep_path(fpath, missing_mask))
         raw = _read_ecgdata(fpath)
         if raw is None:
             prep = np.zeros((self.n_keep, MIN_LEN), np.float32)
@@ -489,10 +531,30 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
                               tag='exp', min_active=0, prep_cache=True,
                               norm_mode='per_channel', verbose=True,
                               train_frac=1.0, train_sources='both',
-                              subsample_seed=0, train_rng_seed=None):
+                              subsample_seed=0, train_rng_seed=None,
+                              real_repeat=1, val_source='auto'):
+    """train_sources: 'both' | 'cohortA' | 'cohortB'  (clinical cohorts)
+                      'sim'                       (simulated cohort only)
+                      'sim+both'                  (simulated + clinical, mixed)
+    real_repeat : when mixing, every clinical recording is listed this many
+                  times so that real:sim sampling is balanced although the
+                  simulated set is larger (per-epoch weight, not new data)
+    val_source  : 'auto' (sim val for 'sim', clinical val otherwise) | 'real' | 'sim'
+    keep_idx (the 252-channel input) always comes from the CLINICAL training
+    geometries so that every model shares the identical input width."""
     buckets, cohortB_assign = collect_split(seed=seed)
     train_s = buckets['train']; val_s = buckets['val']
     ti_s = buckets['test_internal']; te_s = buckets['test_external']
+    use_sim = train_sources in ('sim', 'sim+both')
+    sim_train = buckets.get('sim_train', []); sim_val = buckets.get('sim_val', [])
+    if use_sim and not sim_train:
+        raise RuntimeError(f'train_sources={train_sources} but no simulated recordings under {SIM_ROOT}/train')
+    if val_source == 'auto':
+        val_source = 'sim' if train_sources == 'sim' else 'real'
+    if val_source == 'sim':
+        if not sim_val:
+            raise RuntimeError(f'val_source=sim but no simulated recordings under {SIM_ROOT}/val')
+        val_s = sim_val
     if verbose:
         print(f"Samples — train {len(train_s)} (cohortA+cohortB_train), val {len(val_s)} (cohortB_val), "
               f"test_internal {len(ti_s)} (cohortB_test), test_external {len(te_s)} (external)")
@@ -506,7 +568,7 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
         dropped = sorted(set(range(NCH_RAW)) - set(keep_idx.tolist()))
         print(f"Geometry-registered (train): {len(keep_idx)}; dropped (no geometry): {dropped}")
 
-    all_samples = train_s + val_s + ti_s + te_s
+    all_samples = train_s + val_s + ti_s + te_s + (sim_train if use_sim else [])
     masks = precompute_masks(all_samples, keep_idx, tag=tag, verbose=verbose)
 
     train_rate = np.mean([masks[fp] for _, fp, _ in train_s], axis=0)
@@ -547,9 +609,24 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
     # the identical 252-channel input and the identical val/test sets; only the
     # set of training patients changes.
     n_train_full = len(train_s)
-    train_s = subsample_train(train_s, train_frac=train_frac,
-                              train_sources=train_sources,
-                              subsample_seed=subsample_seed, verbose=verbose)
+    if use_sim:
+        # clinical part: subsampled as usual ('sim+both' -> both cohorts), then
+        # repeated real_repeat x for balanced sampling; 'sim' -> no clinical data
+        real_part = [] if train_sources == 'sim' else subsample_train(
+            train_s, train_frac=train_frac, train_sources='both',
+            subsample_seed=subsample_seed, verbose=verbose)
+        if min_active > 0:
+            sim_train, n_drop_sim = _filter_min_active(sim_train, masks, n_keep, min_active)
+            if verbose:
+                print(f"min_active={min_active}: dropped {n_drop_sim} simulated recordings")
+        train_s = sim_train + real_part * max(1, int(real_repeat))
+        if verbose:
+            print(f"[sim] training set: {len(sim_train)} simulated + {len(real_part)} clinical "
+                  f"x{max(1, int(real_repeat))} = {len(train_s)} entries/epoch (sources={train_sources})")
+    else:
+        train_s = subsample_train(train_s, train_frac=train_frac,
+                                  train_sources=train_sources,
+                                  subsample_seed=subsample_seed, verbose=verbose)
     n_train_pat = len({smp[0].split('__', 2)[1] for smp in train_s})
     if verbose and (train_frac < 1.0 or train_sources != 'both'):
         print(f"[subsample] training set: {len(train_s)}/{n_train_full} recordings, "
@@ -571,6 +648,7 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
                 cohortB_assign=cohortB_assign, n_train=len(train_s), n_val=len(val_s),
                 n_train_full=n_train_full, n_train_patients=n_train_pat,
                 train_frac=train_frac, train_sources=train_sources,
-                subsample_seed=subsample_seed,
+                subsample_seed=subsample_seed, real_repeat=real_repeat,
+                val_source=val_source, n_sim_train=(len(sim_train) if use_sim else 0),
                 n_test_internal=len(ti_s), n_test_external=len(te_s))
     return train_ds, val_ds, ti_ds, te_ds, info

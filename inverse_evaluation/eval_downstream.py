@@ -31,7 +31,7 @@ from build_sources import (load_model, build_context, reconstruct_sources, CROP,
 from inverse import assemble_solver, solve_from_field, load_commercial
 from metrics import temporal_cc, scale_ratio, map_mae_cc, map_errors, hsp_metrics
 from at_rt import extract_sample, good_vertex_mask
-from cache_references import CACHE_ROOT, vc_tag
+from cache_references import CACHE_ROOT, CACHE_ROOT_V1, vc_tag, cache_lookup
 from dataset import collect_split
 
 COMPARE = ['src1_vc', 'src3_recon_whole', 'src4_recon_valid']
@@ -48,7 +48,7 @@ def _atrt(phi):
 
 
 def _load_npz(path):
-    if not os.path.exists(path):
+    if path is None or not os.path.exists(path):
         return None
     with np.load(path, allow_pickle=False) as z:
         return {k: z[k] for k in z.files}
@@ -56,18 +56,26 @@ def _load_npz(path):
 
 def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
              cluster_method='greedy', seed=42, out_csv=None, verbose=True,
-             region='all'):
+             region='all', template_npz=None):
+    """template_npz (v2): alternative fixed layout installed for mode='template'; the src1 cache tag then
+    carries '_tpl-<file stem>' so that no VC-only solution of the main template is reused."""
+    tag_suffix = ''
+    if template_npz:
+        import channel_select as _CS
+        with np.load(template_npz) as z:
+            _CS._TEMPLATES[int(vc)] = (z['idx'].astype(np.int64), z['mean_xyz'].astype(np.float32))
+        tag_suffix = '_tpl-' + os.path.splitext(os.path.basename(template_npz))[0]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, keep_idx, args = load_model(run_dir, device)
     buckets, _ = collect_split(seed=args.get('seed', 42))
     recs = buckets[split][:n]
-    tag = vc_tag(vc, mode, cluster_method, seed, region)
+    tag = vc_tag(vc, mode, cluster_method, seed, region) + tag_suffix
     refs_dir = os.path.join(CACHE_ROOT, split, 'refs')
     vc_dir = os.path.join(CACHE_ROOT, split, tag)
     if verbose:
         print(f"model={os.path.basename(run_dir)}  split={split}  n={len(recs)}  vc={vc} "
               f"{mode}/{cluster_method}  region={region}  tag={tag}  "
-              f"cache={'yes' if os.path.isdir(vc_dir) else 'no'}")
+              f"cache={'yes' if (os.path.isdir(vc_dir) or os.path.isdir(os.path.join(CACHE_ROOT_V1, split, tag))) else 'no'}")
     if (args.get('select_region') or 'all') != region:
         print(f"[warn] model was trained with select_region="
               f"{args.get('select_region') or 'all'} but is deployed with region={region}")
@@ -93,8 +101,8 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
             tw = (ctx['crop_start'], ctx['crop_start'] + CROP)
 
             # ---- references (from cache, else compute) ----
-            ref = _load_npz(os.path.join(refs_dir, sid_safe + '.npz'))
-            c1 = _load_npz(os.path.join(vc_dir, sid_safe + '.npz'))
+            ref = _load_npz(cache_lookup(split, 'refs', sid_safe + '.npz'))
+            c1 = _load_npz(cache_lookup(split, tag, sid_safe + '.npz'))
             if ref is None:
                 phi2 = solve_from_field(solver, torso_ch_idx, *ctx['src2_allvalid'])[0]
                 phicom0 = load_commercial(os.path.splitext(ecgpath)[0] + '.potential', n_h, time_window=tw)
@@ -136,7 +144,8 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
                     row = dict(sid=sid, source=s, ref=r, n_active=ctx['n_active'],
                                n_vc=ctx['n_vc'], n_recon=ctx['n_recon'],
                                region=region,
-                               n_region_fallback=ctx.get('n_region_fallback', 0))
+                               n_region_fallback=ctx.get('n_region_fallback', 0),
+                               n_template_sub=ctx.get('n_template_sub', 0))
                     if s == 'src4_recon_valid' and np.isfinite(bsp_cc):
                         row['bsp_cc'] = bsp_cc
                     ps, pr = phi.get(s), phi.get(r)
@@ -255,7 +264,9 @@ def _write_csv(rows, path):
             # coverage: reference-gate retained fraction + this source's own valid fraction
             'n_h', 'ref_qrs_frac', 'ref_t_frac', 'src_qrs_frac', 'src_t_frac',
             # deployment region of the VC selection + held-out BSP CC (src4 rows)
-            'region', 'n_region_fallback', 'bsp_cc']
+            'region', 'n_region_fallback', 'bsp_cc',
+            # v2: number of substituted electrodes of the fixed template layout
+            'n_template_sub']
     with open(path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys); w.writeheader()
         for r in rows:
@@ -270,13 +281,16 @@ if __name__ == '__main__':
                    choices=['test_internal', 'test_external', 'val'])
     p.add_argument('--n', type=int, default=20)
     p.add_argument('--vc', type=int, default=16)
-    p.add_argument('--mode', default='cluster')
+    p.add_argument('--mode', default='cluster', help="cluster | patch | random | template (v2 fixed layout)")
     p.add_argument('--cluster_method', default='greedy')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--out', default=None)
+    p.add_argument('--template_npz', default=None,
+                   help="v2: alternative fixed layout (npz with idx / mean_xyz, e.g. baselines_analyses/deploy_robustness.py "
+                        "--build_templates) installed in place of bsp_reconstruction/templates/template_vc<N>.npz for mode=template")
     p.add_argument('--region', default='all', choices=['all', 'front', 'back'],
                    help='restrict the deployment VC selection to one torso half')
     a = p.parse_args()
     evaluate(a.run_dir, split=a.split, n=a.n, vc=a.vc, mode=a.mode,
              cluster_method=a.cluster_method, seed=a.seed, out_csv=a.out,
-             region=a.region)
+             region=a.region, template_npz=a.template_npz)

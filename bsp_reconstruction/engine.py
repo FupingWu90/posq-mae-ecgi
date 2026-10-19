@@ -33,7 +33,8 @@ from channel_select import select_visible_batch
 # Test-time selection configurations (mode, cluster_method). cluster_method is
 # ignored for patch / random.
 TEST_CONFIGS = [('cluster', 'greedy'), ('cluster', 'kmean'),
-                ('patch', 'greedy'), ('random', 'greedy')]
+                ('patch', 'greedy'), ('random', 'greedy'),
+                ('template', 'greedy')]      # v2: fixed predetermined deployment layout
 
 
 def cfg_label(mode, cluster_method):
@@ -333,7 +334,11 @@ def test_all_modes(model, loader, device, args, save_dir):
     patch, random), each with its own figures, all under args.select_region.
     Returns {label: metrics}."""
     out = {}
+    region = getattr(args, 'select_region', 'all')
     for mode, cm in TEST_CONFIGS:
+        if mode == 'template' and region != 'all':      # the fixed full-torso template has no in-region variant here
+            print(f"  [test template        ] skipped (select_region={region}; half-torso templates: training_sweeps/eval_region_runs.sh)")
+            continue
         label = cfg_label(mode, cm)
         vis_dir = os.path.join(save_dir, f'test_{label}')
         res = run_eval(model, loader, device, args.vc, mode, cm,

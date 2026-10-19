@@ -33,7 +33,18 @@ from inverse import assemble_solver, solve_from_field, load_commercial
 from at_rt import extract_sample, good_vertex_mask
 from dataset import collect_split
 
-CACHE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache_hsp')
+CACHE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache_hsp')   # v2: new entries
+from paths import V1_HSP_CACHE as CACHE_ROOT_V1, assert_v2            # noqa: E402  (v1 cache: read-only)
+
+
+def cache_lookup(split, sub, fname):
+    """Existing cache file for (split, sub-folder, file): the v2 cache first, then the
+    frozen v1 cache (read-only). None if neither has it."""
+    for root in (CACHE_ROOT, CACHE_ROOT_V1):
+        p = os.path.join(root, split, sub, fname)
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def vc_tag(vc, mode, cm, seed, region='all'):
@@ -75,7 +86,9 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
         sid_safe = sid.replace('/', '_')
         ref_p = os.path.join(refs_dir, sid_safe + '.npz')
         vc_p = os.path.join(vc_dir, sid_safe + '.npz')
-        if os.path.exists(ref_p) and os.path.exists(vc_p):
+        have_ref = cache_lookup(split, 'refs', sid_safe + '.npz') is not None
+        have_vc = cache_lookup(split, tag, sid_safe + '.npz') is not None
+        if have_ref and have_vc:
             continue
         try:
             geom_dir = os.path.dirname(torsopath)
@@ -92,7 +105,7 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
             tw = (ctx['crop_start'], ctx['crop_start'] + CROP)
 
             # ---- refs (VC-independent): src2 all-valid + commercial ----
-            if not os.path.exists(ref_p):
+            if not have_ref:
                 phi2, lam2, _, _, na2 = solve_from_field(solver, torso_ch_idx, *ctx['src2_allvalid'])
                 pk2 = _atrt_pack(phi2)
                 phicom = load_commercial(os.path.splitext(ecgpath)[0] + '.potential', n_h, time_window=tw)
@@ -108,10 +121,10 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
                 if phicom is not None and pkc:
                     d.update(ATcom=pkc[0], RTcom=pkc[1], ARIcom=pkc[2],
                              qrs_goodcom=pkc[3], t_goodcom=pkc[4])
-                np.savez_compressed(ref_p, **d); n_ref_new += 1
+                np.savez_compressed(assert_v2(ref_p), **d); n_ref_new += 1
 
             # ---- src1 VC-only (VC-dependent) ----
-            if not os.path.exists(vc_p):
+            if not have_vc:
                 phi1, lam1, _, _, na1 = solve_from_field(solver, torso_ch_idx, *ctx['src1_vc'])
                 pk1 = _atrt_pack(phi1)
                 d = dict(visible252=ctx['visible252'], n_vc=ctx['n_vc'],
@@ -119,7 +132,7 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
                 if phi1 is not None:
                     d['phi1'] = phi1.astype(np.float16)
                     if pk1: d.update(AT1=pk1[0], RT1=pk1[1], ARI1=pk1[2])
-                np.savez_compressed(vc_p, **d); n_vc_new += 1
+                np.savez_compressed(assert_v2(vc_p), **d); n_vc_new += 1
 
             if verbose and (i % 10 == 0 or i + 1 == len(recs)):
                 print(f"  [{i+1}/{len(recs)}] {sid_safe[:44]:44s} "

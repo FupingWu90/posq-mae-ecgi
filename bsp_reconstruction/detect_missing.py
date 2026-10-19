@@ -7,7 +7,7 @@ amplitude rule (|x|max < 0.04 or > 2.0). Two problems, confirmed empirically:
   * baseline wander inflates raw amplitude of otherwise-clean channels;
   * the absolute upper bound (2.0) is not portable across acquisition systems
     with different gain — internal clean ECG rarely exceeds ~3 after high-pass,
-    while external (the external cohort) clean ECG reaches ~5, so any fixed cut either keeps
+    while clean external-cohort ECG reaches ~5, so any fixed cut either keeps
     internal noise or discards external signal.
 
 This detector works on the 1 Hz HIGH-PASS-FILTERED signal (wander removed) and

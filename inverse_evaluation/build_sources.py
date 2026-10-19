@@ -26,6 +26,7 @@ _CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bsp_reco
 if _CODE not in sys.path:
     sys.path.insert(0, _CODE)
 import models_fixedn                                    # noqa: E402
+import models_v2                                        # noqa: E402
 from preprocess import preprocess_ecgi                  # noqa: E402
 from detect_missing import detect_missing               # noqa: E402
 from torso_loader import load_torso_coords, normalize_coords  # noqa: E402
@@ -48,10 +49,7 @@ def load_model(run_dir, device):
     """Load a trained FixdElectrodsN_Recon model + its keep_idx + args."""
     args = json.load(open(os.path.join(run_dir, 'args.json')))
     keep_idx = np.load(os.path.join(run_dir, 'keep_idx.npy'))
-    model = models_fixedn.__dict__[args['model']](
-        signal_shape=(len(keep_idx), args['crop_len']),
-        patch_size=tuple(args['patch_size']),
-        pos_mode=args.get('pos_embed', 'ppe'))
+    model = models_v2.build_model(args, len(keep_idx))  # v1 names -> v1 classes, posq_* -> PosQ-MAE
     ck = torch.load(os.path.join(run_dir, 'checkpoints', 'checkpoint_best.pth'),
                     map_location='cpu', weights_only=False)
     model.load_state_dict(ck['model'])
@@ -108,6 +106,7 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
         n_recon=int((active252 & ~visible252).sum()),
         region=region, n_region_cand=sel_info['n_region_cand'],
         n_region_fallback=sel_info['n_region_fallback'],
+        n_template_sub=sel_info.get('n_template_sub', 0),
         src1_vc=_to256(prep252, visible252, keep_idx),          # real, VC only
         src2_allvalid=_to256(prep252, active252, keep_idx),     # real, all valid (ref)
     )

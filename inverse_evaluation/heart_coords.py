@@ -37,6 +37,43 @@ import numpy as np
 
 N_THETA, N_Z = 36, 20          # common grid (10 deg x 5% of long axis)
 
+# Where the patient's LEFT lies in the theta frame (theta = 0 anterior): the
+# left-right body axis projected into the short-axis plane sits at about
+# +137 deg (circular mean over 150 test geometries, quartiles 113-142 deg;
+# 2026-09-06) because the apex->base axis is tilted only ~36 deg from the
+# left-right axis. Hence the RV free wall occupies roughly theta in
+# (-120, +30) deg (anterior-right) and the LV free wall theta in (+60, 180)
+# deg (left-posterior); |theta| ~ 180 is the inferior wall.
+THETA_LEFT_DEG = 137.0
+RV_SECTOR = (-120.0, 30.0)
+LV_SECTOR = (60.0, 180.0)
+
+
+def add_sector_axis(ax, fontsize=8, y0=3.0, h=7.0, lw=1.2, color='0.2'):
+    """Downward-opening brackets above a (theta, z) map marking the RV/LV
+    free-wall sectors, with the sector name centred above each bracket.
+
+    `y0` = gap between the top spine and the bracket tips, `h` = bracket height
+    (both in points), so the geometry is layout-independent.  The caller should
+    leave room for it (e.g. ``ax.set_title(..., pad=36)``)."""
+    from matplotlib.transforms import blended_transform_factory, offset_copy
+    base = blended_transform_factory(ax.transData, ax.transAxes)   # x data, y axes
+    fig = ax.figure
+    t_lo = offset_copy(base, fig=fig, x=0, y=y0, units='points')
+    t_hi = offset_copy(base, fig=fig, x=0, y=y0 + h, units='points')
+    t_lab = offset_copy(base, fig=fig, x=0, y=y0 + h + 2.0, units='points')
+    arrow = dict(arrowstyle='-', lw=lw, color=color, shrinkA=0, shrinkB=0)
+    for (lo, hi), lab in ((RV_SECTOR, 'RV free wall\n(anterior-right)'),
+                          (LV_SECTOR, 'LV free wall\n(left-posterior)')):
+        ax.annotate('', xy=(lo, 1), xytext=(hi, 1), xycoords=t_hi, textcoords=t_hi,
+                    arrowprops=arrow, annotation_clip=False)            # top bar
+        for x in (lo, hi):                                              # end ticks, pointing down
+            ax.annotate('', xy=(x, 1), xytext=(x, 1), xycoords=t_lo, textcoords=t_hi,
+                        arrowprops=arrow, annotation_clip=False)
+        ax.text(0.5 * (lo + hi), 1, lab, transform=t_lab, ha='center', va='bottom',
+                fontsize=fontsize, clip_on=False)
+
+
 # Cohort convention (validated on ALL 219 test geometries by _selfcheck):
 #   antero-posterior axis = column 1 for 217/219 patients; the heart sits on the
 #   NEGATIVE side of the torso centre along it for 218/219.  All recordings share
