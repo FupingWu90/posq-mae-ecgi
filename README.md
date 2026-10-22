@@ -256,8 +256,7 @@ If you use this code or the released weights, please cite the paper:
 
 > F. Wu et al., *Sixteen electrodes approximate full-vest electrocardiographic imaging in real-world
 > clinical recordings*, 2026 (submitted). Code and weights: https://github.com/FupingWu90/posq-mae-ecgi
-> (archived release v1.0.0 on Zenodo: https://doi.org/10.5281/zenodo.23573243; all versions:
-> https://doi.org/10.5281/zenodo.23573242).
+> (archived on Zenodo, all versions: https://doi.org/10.5281/zenodo.23573242).
 
 [![DOI](https://zenodo.org/badge/1358517805.svg)](https://doi.org/10.5281/zenodo.23573242)
 

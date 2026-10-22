@@ -18,6 +18,7 @@ training_sweeps/logs/*
 !training_sweeps/logs/.gitkeep
 training_sweeps/failed/
 __pycache__/
+.DS_Store
 *.pyc
 *.log
 *.out

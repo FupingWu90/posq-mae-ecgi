@@ -1,0 +1,13 @@
+{
+ "pick": "DEC1",
+ "flags": [],
+ "reason": "4 wider heads not better by more than 0.002; the 16 heads of v1 are kept",
+ "val_mae": {
+  "DEC1": 0.601816,
+  "DECH": 0.607229
+ },
+ "val_AT": {
+  "DEC1": 12.5077570989055,
+  "DECH": 12.995716800934122
+ }
+}

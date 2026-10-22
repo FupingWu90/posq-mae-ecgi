@@ -1,0 +1,15 @@
+{
+ "base": "DEC1",
+ "flags": [],
+ "reason": "temporal self-attention not better than DEC1 by more than 0.002 in validation MAE",
+ "val_mae": {
+  "DEC1": 0.601816,
+  "DEC2": 0.609523,
+  "DEC3": null
+ },
+ "val_AT": {
+  "DEC1": 12.5077570989055,
+  "DEC2": 13.054616787375057
+ },
+ "v1_val_mae_template": 0.6030080021833474
+}
