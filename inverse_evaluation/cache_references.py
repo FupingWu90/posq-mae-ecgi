@@ -68,7 +68,12 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
                 cluster_method='greedy', seed=42, verbose=True, region='all'):
     args = json.load(open(os.path.join(run_dir, 'args.json')))
     keep_idx = np.load(os.path.join(run_dir, 'keep_idx.npy')).astype(np.int64)
-    buckets, _ = collect_split(seed=args.get('seed', 42))
+    hold = None
+    if args.get('holdout_file'):   # run trained with --holdout_file: extra role 'holdout' (2026-10-20)
+        hold = set(l.strip() for l in open(args['holdout_file']) if l.strip())
+    buckets, _ = collect_split(seed=args.get('seed', 42), holdout=hold)
+    if split == 'holdout' and not hold:
+        raise SystemExit('split=holdout but the run was trained without --holdout_file')
     recs = buckets[split]
     if n:
         recs = recs[:n]
@@ -80,8 +85,9 @@ def cache_split(run_dir, split, n=None, vc=16, mode='cluster',
 
     solver_cache = {}
     n_ref_new = n_vc_new = 0
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     for i, (sid, ecgpath, torsopath) in enumerate(recs):
-        if torsopath is None:
+        if torsopath is None or not _dedup_ok(sid):
             continue
         sid_safe = sid.replace('/', '_')
         ref_p = os.path.join(refs_dir, sid_safe + '.npz')
@@ -150,7 +156,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--run_dir', required=True)
     p.add_argument('--split', default='test_internal',
-                   choices=['test_internal', 'test_external', 'val'])
+                   choices=['test_internal', 'test_external', 'val', 'holdout'])
     p.add_argument('--n', type=int, default=None)
     p.add_argument('--vc', type=int, default=16)
     p.add_argument('--mode', default='cluster')

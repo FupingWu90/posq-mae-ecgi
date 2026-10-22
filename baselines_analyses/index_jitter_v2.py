@@ -39,6 +39,8 @@ def percase(pid, split, layout):
     f = os.path.join(PC, f'{pid}_vc{VC}_{split}_{layout}.csv')
     d = pd.read_csv(f)
     d = d[(d.source == 'src4_recon_valid') & (d.ref == 'commercial')].set_index('sid')
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    d = d[[_dedup_ok(s) for s in d.index]]
     return d[list(METRICS)].apply(pd.to_numeric, errors='coerce')
 
 

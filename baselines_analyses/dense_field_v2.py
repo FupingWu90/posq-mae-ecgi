@@ -361,7 +361,8 @@ def _recs_for(split, n, seed=42):
     if n and n < len(base):                       # keep subset property on re-runs
         step = int(np.ceil(len(base) / n))
         base = base[::step]
-    return base
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21); the sub-sample is otherwise unchanged
+    return [r for r in base if _dedup_ok(r[0])]
 
 
 # --------------------------------------------------------------------------- #

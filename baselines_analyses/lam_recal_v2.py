@@ -109,7 +109,8 @@ def evaluate(split, shard, nshards):
     args, keep_idx = _setup()
     best = json.load(open(os.path.join(outdir(), 'lam_per_n.json')))
     buckets, _ = collect_split(seed=42)
-    recs = [r for r in buckets[split] if r[2]][shard::nshards]
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    recs = [r for r in buckets[split] if r[2] and _dedup_ok(r[0])][shard::nshards]
     rows, solver_cache = [], {}
     for i, rec in enumerate(recs):
         try:

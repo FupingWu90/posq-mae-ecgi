@@ -57,7 +57,7 @@ warnings.filterwarnings('ignore')
 
 VCS = [4, 8, 16, 32, 64]
 METHODS = ['laplacian', 'tps', 'lmmse']
-SPLITS = ['test_internal', 'test_external']
+SPLITS = ['test_internal', 'test_external', 'holdout']   # 'holdout' (2026-10-20): patients listed in --holdout_file
 LAM_GRID = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1]
 OUTDIR = assert_v2(os.path.join(V2_GENERATED, 'classical_template'))
 COVF = os.path.join(V1_GENERATED, 'lmmse_cov.npz')          # frozen v1, read-only
@@ -305,19 +305,62 @@ def process_recording(rec, split, layout, keep_idx, args, cov, lam_best, geom_ca
                                rt_src2=_r(map_mae_cc(RT, rt2, t2)[0], 6),
                                ari_com=_r(map_mae_cc(RT - AT, rtc - atc, tc_)[0], 6),
                                ari_src2=_r(map_mae_cc(RT - AT, rt2 - at2, t2)[0], 6))
+                    if int(np.asarray(tc_, bool).sum()) < 3:    # T-gate rule (2026-10-20): RT/ARI undefined vs the commercial reference
+                        ent.update(rt_com=None, ari_com=None)
+                    if int(np.asarray(t2, bool).sum()) < 3:
+                        ent.update(rt_src2=None, ari_src2=None)
             res[meth][str(vc)] = ent
     return {'sid': sid, 'layout': layout, 'has_commercial': phicom is not None,
             'has_src2': phi2 is not None, 'n_template_sub': nsub, 'results': res}
 
 
-def run_shard(split, layout, shard, nshards, n_max, retry_failed):
+def _holdout(holdout_file):
+    return set(l.strip() for l in open(holdout_file) if l.strip()) if holdout_file else None
+
+
+def fit_cov(out, holdout_file=None, t_stride=4):
+    """LMMSE covariance (port of the frozen v1 lmmse_baseline.fit, T_STRIDE=4) on the training recordings, optionally
+    without the patients of --holdout_file (so that the hold-out split is evaluated with a covariance that has never
+    seen those patients; 2026-10-20)."""
     args, keep_idx = _setup()
-    cov = np.load(COVF)['cov']
+    C = len(keep_idx)
+    buckets, _ = collect_split(seed=42, holdout=_holdout(holdout_file))
+    recs = [r for r in buckets['train'] if r[2]]
+    S = np.zeros((C, C)); N = np.zeros((C, C)); n_used = 0
+    for i, rec in enumerate(recs):
+        ctx = build_context(rec[1], rec[2], keep_idx, args, vc=16, mode='cluster', cluster_method='kmean', seed=42)
+        if ctx is None:
+            continue
+        act = ctx['active252'].astype(bool)
+        x = ctx['prep252'][:, ::t_stride].astype(np.float64)
+        sd = x[act].std(axis=1)
+        g = np.median(sd[sd > 1e-8]) if (sd > 1e-8).any() else 1.0
+        x = x / max(g, 1e-8)
+        x -= x.mean(axis=1, keepdims=True)
+        x[~act] = 0.0
+        a = act.astype(np.float64)
+        S += x @ x.T
+        N += np.outer(a, a) * x.shape[1]
+        n_used += 1
+        if (i + 1) % 100 == 0:
+            print(f'[fit_cov] {i+1}/{len(recs)}', flush=True)
+    cov = np.where(N > 0, S / np.maximum(N, 1), 0.0)
+    np.savez_compressed(assert_v2(out), cov=cov, n_recordings=n_used)
+    print(f'wrote {out}  ({n_used} training recordings, mean diag {np.diag(cov).mean():.4f})', flush=True)
+
+
+def run_shard(split, layout, shard, nshards, n_max, retry_failed, holdout_file=None, cov_file=None):
+    args, keep_idx = _setup()
+    cov = np.load(cov_file or COVF)['cov']
     lam_best = json.load(open(lam_file(layout)))
     cache_dir = assert_v2(os.path.join(OUTDIR, f'cache_{layout}', split))
     os.makedirs(cache_dir, exist_ok=True)
-    buckets, _ = collect_split(seed=42)
-    recs = [r for r in buckets[split] if r[2]][:n_max][shard::nshards]
+    hold = _holdout(holdout_file)
+    if split == 'holdout' and not hold:
+        raise SystemExit('split=holdout needs --holdout_file')
+    buckets, _ = collect_split(seed=42, holdout=hold)
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    recs = [r for r in buckets[split] if r[2] and _dedup_ok(r[0])][:n_max][shard::nshards]
     geom_cache = {}
     n_done = n_skip = n_fail = 0
     for i, rec in enumerate(recs):
@@ -430,10 +473,15 @@ if __name__ == '__main__':
     p.add_argument('--n', type=int, default=10**9)
     p.add_argument('--retry_failed', action='store_true')
     p.add_argument('--summary', action='store_true')
+    p.add_argument('--holdout_file', default=None, help='patient folders of the hold-out role (one per line); required for --split holdout')
+    p.add_argument('--cov', default=None, help='alternative LMMSE covariance npz (default: frozen v1 lmmse_cov.npz)')
+    p.add_argument('--fit_cov', default=None, metavar='OUT_NPZ', help='fit the LMMSE covariance on the training recordings (minus --holdout_file) and write it')
     a = p.parse_args()
+    if a.fit_cov:
+        fit_cov(a.fit_cov, a.holdout_file)
     if a.calibrate:
         calibrate(a.layout, a.n_recs)
     if a.split:
-        run_shard(a.split, a.layout, a.shard, a.nshards, a.n, a.retry_failed)
+        run_shard(a.split, a.layout, a.shard, a.nshards, a.n, a.retry_failed, a.holdout_file, a.cov)
     if a.summary:
         summarize(a.layout)

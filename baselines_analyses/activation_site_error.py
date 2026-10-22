@@ -66,6 +66,7 @@ def main():
     ap.add_argument('--frac', type=float, default=0.10)
     a = ap.parse_args()
     buckets, _ = collect_split(seed=42)
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     od = assert_v2(os.path.join(V2_GENERATED, 'site_error')); os.makedirs(od, exist_ok=True)
     out, meshes = {}, {}
     for layout in a.layouts:
@@ -74,7 +75,7 @@ def main():
             pmap = patient_map(split); rows = []
             n_miss = {'atmap': 0, 'vc': 0, 'ref': 0, 'gate': 0}
             for sid, _ecg, torso in buckets[split]:
-                if not torso:
+                if not torso or not _dedup_ok(sid):
                     continue
                 fa = os.path.join(V2_GENERATED, 'atmaps', a.id, f'{split}_{layout}', sid + '.npz')
                 fv = cache_lookup(split, vtag, sid + '.npz'); fr = cache_lookup(split, 'refs', sid + '.npz')

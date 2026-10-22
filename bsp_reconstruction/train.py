@@ -42,6 +42,9 @@ def get_args():
                    help='disable the full-recording preprocessing cache (preprocess '
                         'every access instead; slower but no ~11GB disk cache)')
     p.add_argument('--dataset_tag', type=str, default='cohortA+cohortB_vs_external')
+    p.add_argument('--holdout_file', type=str, default=None,
+                   help='optional text file with one patient folder name per line; their recordings are removed '
+                        'from train/val (role holdout) before training (2026-10-20 invasive-mapping hold-out)')
     p.add_argument('--pp_norm', type=str, default='centroid')
     p.add_argument('--norm_mode', type=str, default='global',
                    choices=['global', 'per_channel'],
@@ -272,7 +275,8 @@ def main(args):
         min_active=min_active, prep_cache=prep_cache, norm_mode=args.norm_mode,
         verbose=True, train_frac=args.train_frac, train_sources=args.train_sources,
         subsample_seed=args.subsample_seed, train_rng_seed=rng_seed,
-        real_repeat=args.real_repeat, val_source=args.val_source)
+        real_repeat=args.real_repeat, val_source=args.val_source,
+        holdout_patients=(set(l.strip() for l in open(args.holdout_file) if l.strip()) if args.holdout_file else None))
     n_keep = info['n_keep']
     if args.test_limit > 0:
         ti_ds.samples = ti_ds.samples[:args.test_limit]; te_ds.samples = te_ds.samples[:args.test_limit]

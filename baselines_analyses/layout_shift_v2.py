@@ -20,6 +20,7 @@ Out: baselines_analyses/generated/layout_shift_v2.json ; --figs: figures/fig_lay
 import os, sys, json, glob, argparse, warnings
 V2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(V2, 'bsp_reconstruction')); sys.path.insert(0, os.path.join(V2, 'inverse_evaluation'))
+from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
@@ -103,7 +104,7 @@ def main():
     res = {'config': {'vc': VC, 'n': a.n, 'alphas': a.alphas, 'layouts': a.layouts,
                       'models': {arm: [p for (ar, p) in models if ar == arm] for arm in ('ppe', 'index')}}}
     for split in ('test_internal', 'test_external'):
-        recs = [r for r in buckets[split] if r[2]]
+        recs = [r for r in buckets[split] if r[2] and _dedup_ok(r[0])]   # one recording per content key (2026-10-21), then n evenly spaced
         recs = [recs[i] for i in np.linspace(0, len(recs) - 1, a.n).astype(int)]
         acc = {(lay, key, al): [] for lay in a.layouts for key in models for al in a.alphas}
         disp_acc = {(lay, al): [] for lay in a.layouts for al in a.alphas}
@@ -178,6 +179,9 @@ def make_figs():
             x = [R['displacement_spacings'][al] for al in alphas]
             fig, ax = plt.subplots(figsize=(5.0, 3.6), constrained_layout=True)
             ns = R['ppe|mean'][alphas[0]]['n_seeds']
+            for arm, col in (('ppe|mean', '#0072B2'), ('index|mean', '#D55E00')):   # range over the training seeds (2026-10-20)
+                if all('cc_min' in R[arm][al] for al in alphas):
+                    ax.fill_between(x, [R[arm][al]['cc_min'] for al in alphas], [R[arm][al]['cc_max'] for al in alphas], color=col, alpha=0.15, lw=0)
             ax.plot(x, [R['ppe|mean'][al]['cc'] for al in alphas], 's-', color='#0072B2', lw=2, ms=6,
                     label='Ours (physical positions)')
             ax.plot(x, [R['index|mean'][al]['cc'] for al in alphas], 'o--', color='#D55E00', lw=1.8, ms=6,
@@ -187,7 +191,7 @@ def make_figs():
             ax.set_title(f'{lab} dataset' + (' (per-recording $k$-means layout)' if lay == 'kmeans' else ''), fontsize=10)
             ax.grid(alpha=0.25); ax.legend(frameon=False, fontsize=8, loc='lower left')
             out = f'fig_layout_shift_{lab}{sfx}_v2.png'
-            fig.savefig(assert_v2(os.path.join(FIG_DIR_V2, out)), dpi=150); plt.close(fig)
+            fig.savefig(assert_v2(os.path.join(FIG_DIR_V2, out)), dpi=int(os.environ.get('ECGI_FIG_DPI', '150'))); plt.close(fig)
             print('wrote', out, f'(seed-mean over {ns} / {R["index|mean"][alphas[0]]["n_seeds"]} models)')
 
 

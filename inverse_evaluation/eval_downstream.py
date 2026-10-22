@@ -9,7 +9,7 @@ solves their inverse, and scores sources (1)/(3)/(4) against references
 + spatial CC. If a recording is not cached, its references are computed on the
 fly (slower).
 
-  python eval_downstream.py --run_dir <trained run> [--split ...] [--n N] [--out csv]
+  python eval_downstream.py --run_dir <trained run> [--split ...|holdout] [--n N] [--out csv]
                             [--region all|front|back]
 
 --region restricts the deployment VC selection to one torso half (see
@@ -56,7 +56,7 @@ def _load_npz(path):
 
 def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
              cluster_method='greedy', seed=42, out_csv=None, verbose=True,
-             region='all', template_npz=None):
+             region='all', template_npz=None, extra_loss=0.0, extra_loss_seed=0):
     """template_npz (v2): alternative fixed layout installed for mode='template'; the src1 cache tag then
     carries '_tpl-<file stem>' so that no VC-only solution of the main template is reused."""
     tag_suffix = ''
@@ -67,8 +67,16 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
         tag_suffix = '_tpl-' + os.path.splitext(os.path.basename(template_npz))[0]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, keep_idx, args = load_model(run_dir, device)
-    buckets, _ = collect_split(seed=args.get('seed', 42))
+    hold = None
+    if args.get('holdout_file'):
+        hold = set(l.strip() for l in open(args['holdout_file']) if l.strip())
+    buckets, _ = collect_split(seed=args.get('seed', 42), holdout=hold)
+    if split == 'holdout' and not hold:
+        raise SystemExit('split=holdout but the run was trained without --holdout_file')
     recs = buckets[split][:n]
+    if extra_loss > 0:
+        tag_suffix += f'_loss{int(round(extra_loss * 100))}s{int(extra_loss_seed)}'
+    compare = list(COMPARE) + (['src2_reduced'] if extra_loss > 0 else [])
     tag = vc_tag(vc, mode, cluster_method, seed, region) + tag_suffix
     refs_dir = os.path.join(CACHE_ROOT, split, 'refs')
     vc_dir = os.path.join(CACHE_ROOT, split, tag)
@@ -82,8 +90,9 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
 
     solver_cache = {}
     rows = []
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     for i, (sid, ecgpath, torsopath) in enumerate(recs):
-        if torsopath is None:
+        if torsopath is None or not _dedup_ok(sid):
             continue
         sid_safe = sid.replace('/', '_')
         try:
@@ -95,7 +104,7 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
 
             ctx = build_context(ecgpath, torsopath, keep_idx, args, vc=vc,
                                 mode=mode, cluster_method=cluster_method, seed=seed,
-                                region=region)
+                                region=region, extra_loss=extra_loss, extra_loss_seed=extra_loss_seed)
             if ctx is None:
                 continue
             tw = (ctx['crop_start'], ctx['crop_start'] + CROP)
@@ -127,21 +136,25 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
             recon = reconstruct_sources(model, ctx, device)
             for name in ('src3_recon_whole', 'src4_recon_valid'):
                 phi[name] = solve_from_field(solver, torso_ch_idx, *recon[name])[0]
+            if extra_loss > 0:
+                # the reduced vest's own full-channel inverse as a competing source (reference stays the cached one)
+                phi['src2_reduced'] = solve_from_field(solver, torso_ch_idx, *ctx['src2_allvalid'])[0]
             # BSP CC on the held-out electrodes (active & registered & ~visible)
             bsp_cc, _n_bsp = held_out_bsp_cc(ctx, recon['recon252'])
 
             # AT/RT and each source's OWN good-vertex mask (mask reported only, never
             # used to gate the comparison -> the eval vertex set stays source-independent)
             good_src = {}
-            for name in COMPARE:
+            for name in compare:
                 a = _atrt(phi.get(name))
                 at[name] = {'AT': a['AT'], 'RT': a['RT']} if a else None
                 good_src[name] = good_vertex_mask(a['sigavg'], *a['windows']) if a else None
 
             # ---- metrics ----
-            for s in COMPARE:
+            for s in compare:
                 for r in REFS:
                     row = dict(sid=sid, source=s, ref=r, n_active=ctx['n_active'],
+                               n_active_orig=ctx.get('n_active_orig', ctx['n_active']), extra_loss=extra_loss,
                                n_vc=ctx['n_vc'], n_recon=ctx['n_recon'],
                                region=region,
                                n_region_fallback=ctx.get('n_region_fallback', 0),
@@ -174,6 +187,9 @@ def evaluate(run_dir, split='test_internal', n=20, vc=16, mode='cluster',
                             ari_r = np.asarray(a_r['RT'], float) - np.asarray(a_r['AT'], float)
                             row['ARI_mae'], row['ARI_mdae'], row['ARI_cc'] = \
                                 map_errors(ari_s, ari_r, tmask)
+                            if tmask is not None and int(np.asarray(tmask, bool).sum()) < 3:   # T-gate rule (2026-10-20): RT/ARI undefined
+                                for _k in ('RT_mae', 'RT_mdae', 'RT_cc', 'ARI_mae', 'ARI_mdae', 'ARI_cc'):
+                                    row[_k] = float('nan')
                             # (ii) ALL-VERTICES set (no exclusion) -> the unarguable fair comparison
                             row['AT_mae_allv'], row['AT_mdae_allv'], _ = map_errors(a_s['AT'], a_r['AT'], None)
                             row['RT_mae_allv'], row['RT_mdae_allv'], _ = map_errors(a_s['RT'], a_r['RT'], None)
@@ -266,7 +282,7 @@ def _write_csv(rows, path):
             # deployment region of the VC selection + held-out BSP CC (src4 rows)
             'region', 'n_region_fallback', 'bsp_cc',
             # v2: number of substituted electrodes of the fixed template layout
-            'n_template_sub']
+            'n_template_sub', 'n_active_orig', 'extra_loss']
     with open(path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys); w.writeheader()
         for r in rows:
@@ -278,7 +294,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--run_dir', required=True)
     p.add_argument('--split', default='test_internal',
-                   choices=['test_internal', 'test_external', 'val'])
+                   choices=['test_internal', 'test_external', 'val', 'holdout'])
     p.add_argument('--n', type=int, default=20)
     p.add_argument('--vc', type=int, default=16)
     p.add_argument('--mode', default='cluster', help="cluster | patch | random | template (v2 fixed layout)")
@@ -288,9 +304,13 @@ if __name__ == '__main__':
     p.add_argument('--template_npz', default=None,
                    help="v2: alternative fixed layout (npz with idx / mean_xyz, e.g. baselines_analyses/deploy_robustness.py "
                         "--build_templates) installed in place of bsp_reconstruction/templates/template_vc<N>.npz for mode=template")
+    p.add_argument('--extra_loss', type=float, default=0.0,
+                   help='emulated heavy channel loss: extra fraction of the ACTIVE channels flagged missing (2026-10-20)')
+    p.add_argument('--extra_loss_seed', type=int, default=0)
     p.add_argument('--region', default='all', choices=['all', 'front', 'back'],
                    help='restrict the deployment VC selection to one torso half')
     a = p.parse_args()
     evaluate(a.run_dir, split=a.split, n=a.n, vc=a.vc, mode=a.mode,
              cluster_method=a.cluster_method, seed=a.seed, out_csv=a.out,
-             region=a.region, template_npz=a.template_npz)
+             region=a.region, template_npz=a.template_npz,
+             extra_loss=a.extra_loss, extra_loss_seed=a.extra_loss_seed)

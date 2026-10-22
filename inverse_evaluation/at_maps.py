@@ -32,7 +32,9 @@ def main():
     dev = torch.device('cpu')
     model, keep_idx, args = load_model(run, dev)
     vc = int(args['vc']); mode, cm = LAYOUTS[a.layout]
-    recs = [r for r in collect_split(seed=args.get('seed', 42))[0][a.split] if r[2]][:a.n]
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    hold = set(l.strip() for l in open(args['holdout_file']) if l.strip()) if args.get('holdout_file') else None   # run trained with --holdout_file: extra role 'holdout' (2026-10-21)
+    recs = [r for r in collect_split(seed=args.get('seed', 42), holdout=hold)[0][a.split] if r[2] and _dedup_ok(r[0])][:a.n]
     solver_cache = {}; n_new = n_skip = n_fail = 0
     for i, (sid, ecgpath, torsopath) in enumerate(recs):
         p = os.path.join(out_dir, sid.replace('/', '_') + '.npz')

@@ -115,11 +115,14 @@ def _ecgfiles(pdir, scope):
     return sorted(glob.glob(os.path.join(pdir, scope, '*.ecgdata')))
 
 
-def collect_split(seed=42):
+def collect_split(seed=42, holdout=None):
     """role -> list of (sample_id, filepath, torso_path); roles:
-    'train','val','test_internal','test_external'. Returns (buckets, cohortB_assign)."""
+    'train','val','test_internal','test_external'. Returns (buckets, cohortB_assign).
+    holdout: optional set of patient folder names (any cohort); their recordings are moved from 'train'
+    (and 'val') into the extra role 'holdout' AFTER the seed-based split, so every other role is unchanged
+    (2026-10-20: invasive-mapping hold-out retrain; the list lives in a private file, never printed)."""
     buckets = {'train': [], 'val': [], 'test_internal': [], 'test_external': [],
-               'sim_train': [], 'sim_val': [], 'sim_test': []}
+               'sim_train': [], 'sim_val': [], 'sim_test': [], 'holdout': []}
     seen = set()
 
     def add(role, root_tag, pdir, scope):
@@ -156,6 +159,14 @@ def collect_split(seed=42):
             for p in _patient_dirs(root):
                 add(f'sim_{split}', 'sim', os.path.join(root, p), 'CI')
 
+    if holdout:
+        hold = set(holdout)
+        for role in ('train', 'val'):
+            keep, moved = [], []
+            for rec in buckets[role]:
+                (moved if rec[0].split('__', 2)[1] in hold else keep).append(rec)
+            buckets[role] = keep; buckets['holdout'] += moved
+        buckets['holdout'].sort()
     return buckets, dict(cohortB_train=cohortB_train, cohortB_val=cohortB_val, cohortB_test=cohortB_test)
 
 
@@ -532,7 +543,7 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
                               norm_mode='per_channel', verbose=True,
                               train_frac=1.0, train_sources='both',
                               subsample_seed=0, train_rng_seed=None,
-                              real_repeat=1, val_source='auto'):
+                              real_repeat=1, val_source='auto', holdout_patients=None):
     """train_sources: 'both' | 'cohortA' | 'cohortB'  (clinical cohorts)
                       'sim'                       (simulated cohort only)
                       'sim+both'                  (simulated + clinical, mixed)
@@ -542,8 +553,13 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
     val_source  : 'auto' (sim val for 'sim', clinical val otherwise) | 'real' | 'sim'
     keep_idx (the 252-channel input) always comes from the CLINICAL training
     geometries so that every model shares the identical input width."""
-    buckets, cohortB_assign = collect_split(seed=seed)
+    buckets, cohortB_assign = collect_split(seed=seed, holdout=holdout_patients)
     train_s = buckets['train']; val_s = buckets['val']
+    if holdout_patients:
+        n_hold_pat = len({r[0].split('__', 2)[1] for r in buckets['holdout']})
+        if verbose:
+            print(f"[holdout] {len(buckets['holdout'])} recordings of {n_hold_pat} patients removed from train/val "
+                  f"(train now {len(train_s)}, val {len(val_s)})")
     ti_s = buckets['test_internal']; te_s = buckets['test_external']
     use_sim = train_sources in ('sim', 'sim+both')
     sim_train = buckets.get('sim_train', []); sim_val = buckets.get('sim_val', [])
@@ -650,5 +666,7 @@ def build_experiment_datasets(crop_len=CROP_LEN, preprocess=True,
                 train_frac=train_frac, train_sources=train_sources,
                 subsample_seed=subsample_seed, real_repeat=real_repeat,
                 val_source=val_source, n_sim_train=(len(sim_train) if use_sim else 0),
-                n_test_internal=len(ti_s), n_test_external=len(te_s))
+                n_test_internal=len(ti_s), n_test_external=len(te_s),
+                n_holdout=len(buckets['holdout']),
+                n_holdout_patients=len({r[0].split('__', 2)[1] for r in buckets['holdout']}))
     return train_ds, val_ds, ti_ds, te_ds, info

@@ -65,7 +65,7 @@ def _to256(field252, act_sub, keep_idx):
 
 def build_context(ecgdata_path, torso_path, keep_idx, args,
                   vc=16, mode='cluster', cluster_method='greedy', seed=42,
-                  region='all'):
+                  region='all', extra_loss=0.0, extra_loss_seed=0):
     """MODEL-FREE: prep signal + masks + VC selection + src1/src2 fields.
     `region` ('all' | 'front' | 'back') restricts the VC candidates to one torso
     half (channel_select.region_mask); 'all' is a strict no-op.
@@ -83,6 +83,16 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
     raw_coords = raw[keep_idx]
 
     missing252 = detect_missing(ecg252, coords=raw_coords)
+    n_active_orig = int((~missing252).sum())
+    if extra_loss > 0:
+        # emulated heavy channel loss (2026-10-20): drop an extra fraction of the ACTIVE channels at random,
+        # reproducibly per recording (seed from the file name), before preprocessing and selection
+        import zlib
+        rng_l = np.random.default_rng(int(extra_loss_seed) * 1000003 + zlib.crc32(os.path.basename(ecgdata_path).encode()))
+        act = np.where(~missing252)[0]
+        k = int(round(float(extra_loss) * len(act)))
+        if k > 0:
+            missing252 = missing252.copy(); missing252[rng_l.choice(act, k, replace=False)] = True
     active252 = ~missing252
     prep252 = preprocess_ecgi(ecg252, missing252).astype(np.float32)
 
@@ -102,7 +112,7 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
     return dict(
         keep_idx=keep_idx, prep252=prep252, coords=coords,
         active252=active252, visible252=visible252, g=g, crop_start=s, L=L,
-        n_active=int(active252.sum()), n_vc=int(visible252.sum()),
+        n_active=int(active252.sum()), n_active_orig=n_active_orig, n_vc=int(visible252.sum()),
         n_recon=int((active252 & ~visible252).sum()),
         region=region, n_region_cand=sel_info['n_region_cand'],
         n_region_fallback=sel_info['n_region_fallback'],

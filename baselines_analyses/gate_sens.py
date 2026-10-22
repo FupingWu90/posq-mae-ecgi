@@ -40,14 +40,17 @@ def allvalid(split):
         for f in glob.glob(os.path.join(root, split, 'refs', '*.npz')):
             files.setdefault(os.path.basename(f)[:-4], f)
     rows = {}
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     for sid, f in files.items():
+        if not _dedup_ok(sid):
+            continue
         with np.load(f, allow_pickle=False) as z:
             if not all(k in z.files for k in ('AT2', 'RT2', 'ATcom', 'RTcom', 'qrs_goodcom', 't_goodcom')):
                 continue
             at2, atc, rt2, rtc = (z[k].astype(float) for k in ('AT2', 'ATcom', 'RT2', 'RTcom'))
             q, t = z['qrs_goodcom'].astype(bool), z['t_goodcom'].astype(bool)
             rows[sid] = {'AT_mae': map_errors(at2, atc, q)[0], 'AT_mae_allv': map_errors(at2, atc, None)[0],
-                         'RT_mae': map_errors(rt2, rtc, t)[0], 'RT_mae_all': map_errors(rt2, rtc, q)[0],
+                         'RT_mae': (map_errors(rt2, rtc, t)[0] if int(t.sum()) >= 3 else float('nan')), 'RT_mae_all': map_errors(rt2, rtc, q)[0],   # T-gate rule (2026-10-20)
                          'RT_mae_allv': map_errors(rt2, rtc, None)[0]}
     return pd.DataFrame(rows).T
 

@@ -44,6 +44,8 @@ def learned_percase(path, source):
     if not os.path.exists(path):
         return None
     df = pd.read_csv(path)
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    df = df[[_dedup_ok(s) for s in df['sid']]]
     df = df[(df.source == source) & (df.ref == 'commercial')].set_index('sid')
     return {m: pd.to_numeric(df[m], errors='coerce') for m in METRICS if m in df.columns}
 

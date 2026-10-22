@@ -28,6 +28,31 @@ OURS_ID = {4: 'P3N4', 8: 'P3N8', 16: 'LOC3', 32: 'P3N32', 64: 'P3N64'}
 STD = 'cluster-greedy_val-cluster-kmean_nm-gl_ws0-wt3-rw100_sc-recon_k6s10_ebs64_crop5000_ep800'
 COLS = [('ours', 'Ours'), ('stmem', 'ST-MEM'), ('mcma', 'MCMA'), ('lmmse', 'LMMSE'), ('laplacian', 'Laplace'), ('tps', 'TPS'), ('vconly', 'VC-only')]
 REF, LAYOUT = 'commercial', 'template'
+FIG_DPI = int(os.environ.get('ECGI_FIG_DPI', '150'))   # 2026-10-20: 300 for the npj figure files
+_PMAP = {}
+
+
+def pmap_of(split):
+    if split not in _PMAP:
+        from patient_ids import patient_map
+        _PMAP[split] = patient_map(split)
+    return _PMAP[split]
+
+
+def boot_ci(vals, pmap, B=1000, seed=0):
+    """(mean, lo, hi): cohort mean over recordings and its 95% CI from a bootstrap over PATIENTS (the recordings of a
+    resampled patient enter together; recordings of one patient are repeated measures).  2026-10-20, Fig. 2 error bars."""
+    groups = {}
+    for sid, v in vals.items():
+        if sid in pmap and v is not None and np.isfinite(v):
+            groups.setdefault(pmap[sid], []).append(float(v))
+    if not groups:
+        return np.nan, np.nan, np.nan
+    psum = np.array([np.sum(g) for g in groups.values()]); pcnt = np.array([len(g) for g in groups.values()], float)
+    mean = float(psum.sum() / pcnt.sum())
+    idx = np.random.default_rng(seed).integers(0, len(psum), size=(B, len(psum)))
+    boots = psum[idx].sum(axis=1) / pcnt[idx].sum(axis=1)
+    return mean, float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
 fmt = lambda x, p=2: (f'{x:.{p}f}' if isinstance(x, (int, float)) and np.isfinite(x) else '--')
 
 
@@ -38,15 +63,21 @@ def stars(p):
 
 
 def percase(path, source):
-    """{sid: {AT, RT, ARI, HSP, BSP?}} from an eval_downstream CSV, rows of `source` vs the current REF."""
+    """{sid: {AT, RT, ARI, HSP, BSP?}} from an eval_downstream CSV, rows of `source` vs the current REF.
+    RT / ARI are kept only where the reference T-gate holds >= 3 vertices (baselines_analyses/tgate_rule.py; 2026-10-20)."""
+    from tgate_rule import ok as _tgate_ok
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
+    split = next((sp for sp in ('test_internal', 'test_external', 'holdout', 'val') if sp in os.path.basename(path)), None)
     out = {}
     if not os.path.exists(path):
         return out
     for r in csv.DictReader(open(path)):
-        if r['source'] != source or r['ref'] != REF:
+        if r['source'] != source or r['ref'] != REF or not _dedup_ok(r['sid']):
             continue
         d = {}
         for met in METS:
+            if met in ('RT', 'ARI') and split and not _tgate_ok(split, r['sid'], REF):
+                continue
             try:
                 d[met] = float(r[f'{met}_mae'])
             except (TypeError, ValueError):
@@ -72,14 +103,18 @@ def learned_csv(key, vc, split):
     return os.path.join(V1_GENERATED, 'vc_percase', f"{'peindex' if key == 'stmem' else 'mcma'}_vc{vc}_{split}.csv")
 
 
-def classical_percase(entries, method, vc):
+def classical_percase(entries, method, vc, split=None):
+    from tgate_rule import ok as _tgate_ok
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     suf = 'com' if REF == 'commercial' else 'src2'
     out = {}
     for (sid, m, v), e in entries.items():
-        if m != method or v != vc:
+        if m != method or v != vc or not _dedup_ok(sid):
             continue
         d = {}
         for met, col in (('AT', f'at_{suf}'), ('RT', f'rt_{suf}'), ('ARI', f'ari_{suf}')):
+            if met in ('RT', 'ARI') and split and not _tgate_ok(split, sid, REF):
+                continue
             if e.get(col) is not None and np.isfinite(e[col]):
                 d[met] = float(e[col])
         h = e.get('hsp_cc' if REF == 'commercial' else 'hsp_cc_src2')
@@ -102,7 +137,10 @@ def load_allvalid(split, met):
     for root in (CACHE_ROOT, CACHE_ROOT_V1):
         for f in glob.glob(os.path.join(root, split, 'refs', '*.npz')):
             files.setdefault(os.path.basename(f), f)
+    from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
     for name, f in files.items():
+        if not _dedup_ok(name[:-4]):
+            continue
         with np.load(f, allow_pickle=False) as z:
             if 'AT2' not in z.files or 'ATcom' not in z.files:
                 continue
@@ -141,7 +179,7 @@ def load_everything():
             for key in ('stmem', 'mcma'):
                 P[(key, vc, split)] = percase(learned_csv(key, vc, split), 'src4_recon_valid')
             for m in ('lmmse', 'laplacian', 'tps'):
-                P[(m, vc, split)] = classical_percase(T, m, vc)
+                P[(m, vc, split)] = classical_percase(T, m, vc, split)
             for m, _ in COLS:
                 for q in METS + ['HSP']:
                     M[(m, vc, split, q)] = mean_of(P[(m, vc, split)], q)
@@ -223,36 +261,56 @@ STY = {'ours': ('#0072B2', 's-', 'Ours'), 'stmem': ('#E69F00', 'o-', 'ST-MEM'), 
        'vconly': ('#D55E00', 'X:', 'VC-only')}
 
 
-def figures(M):
+def figures(M, P=None):
     lay = '' if LAYOUT == 'template' else '_km'
     os.makedirs(FIG_DIR_V2, exist_ok=True)
+    offs = np.linspace(-0.16, 0.16, len(STY))   # dodge on the log2 axis so that error bars do not overlap
     for met in ('AT', 'RT'):
         for split, lab in (('test_internal', 'internal'), ('test_external', 'external')):
             allv = load_allvalid(split, met); allv_mean = float(np.mean(list(allv.values())))
+            pm = pmap_of(split)
             fig, ax = plt.subplots(figsize=(5.2, 3.7), constrained_layout=True)
-            for m, (c, mk, name) in STY.items():
+            for i, (m, (c, mk, name)) in enumerate(STY.items()):
                 y = [M.get((m, vc, split, met)) if M.get((m, vc, split, met)) is not None else np.nan for vc in VCS]
-                ax.plot(VCS, y, mk, color=c, lw=2.0 if m == 'ours' else 1.4, ms=6 if m == 'ours' else 4.5, label=name)
-            ax.axhline(allv_mean, color='#009E73', ls='--', lw=1.4)
-            ax.text(VCS[-1], allv_mean, ' all valid', color='#009E73', fontsize=8, ha='right', va='bottom')
+                if P is not None:
+                    ci = [boot_ci({sid: d.get(met) for sid, d in P.get((m, vc, split), {}).items()}, pm) for vc in VCS]
+                    yerr = [[max(yy - lo, 0) if np.isfinite(lo) else 0 for yy, (_, lo, _h) in zip(y, ci)],
+                            [max(hi - yy, 0) if np.isfinite(hi) else 0 for yy, (_, _l, hi) in zip(y, ci)]]
+                    ax.errorbar(np.array(VCS) * 2.0 ** offs[i], y, yerr=yerr, fmt=mk, color=c, lw=2.0 if m == 'ours' else 1.4,
+                                ms=6 if m == 'ours' else 4.5, capsize=2, elinewidth=0.9, capthick=0.9, label=name)
+                else:
+                    ax.plot(VCS, y, mk, color=c, lw=2.0 if m == 'ours' else 1.4, ms=6 if m == 'ours' else 4.5, label=name)
+            if P is not None:
+                _, alo, ahi = boot_ci(allv, pm)
+                if np.isfinite(alo):
+                    ax.axhspan(alo, ahi, color='#009E73', alpha=0.12, lw=0)
+            ax.axhline(allv_mean, color='#009E73', ls='--', lw=1.4, label='all-valid inverse (252)')   # legend entry instead of an in-plot label (2026-10-20)
             ax.set_xscale('log', base=2); ax.set_xticks(VCS); ax.set_xticklabels(VCS)
             ax.set_xlabel('number of visible electrodes $N$'); ax.set_ylabel(f'epicardial {met} MAE vs commercial (ms)')
             ax.set_title(f'{lab} dataset', fontsize=10); ax.grid(alpha=0.25, lw=0.5)
             ax.legend(frameon=False, fontsize=7.5, ncol=2 if met == 'RT' else 1)
-            out = os.path.join(FIG_DIR_V2, f'fig_baselines_{met.lower()}_{lab}{lay}_v2.png'); fig.savefig(out, dpi=150); plt.close(fig); print('wrote', os.path.basename(out))
+            out = os.path.join(FIG_DIR_V2, f'fig_baselines_{met.lower()}_{lab}{lay}_v2.png'); fig.savefig(out, dpi=FIG_DPI); plt.close(fig); print('wrote', os.path.basename(out))
     panels = [('bsp', 'BSP completion CC (held-out electrodes)', 'BSP', ('ours', 'stmem', 'mcma', 'lmmse', 'laplacian', 'tps')),
               ('hsp', 'epicardial HSP CC vs commercial', 'HSP', ('ours', 'stmem', 'mcma', 'lmmse', 'laplacian', 'tps', 'vconly'))]
     for kind, ylab, q, meths in panels:
         for split, lab in (('test_internal', 'internal'), ('test_external', 'external')):
             fig, ax = plt.subplots(figsize=(5.2, 3.7), constrained_layout=True)
-            for m in meths:
+            pm = pmap_of(split)
+            for i, m in enumerate(meths):
                 c, mk, name = STY[m]
                 y = [M.get((m, vc, split, q)) if M.get((m, vc, split, q)) is not None else np.nan for vc in VCS]
-                ax.plot(VCS, y, mk, color=c, lw=2.0 if m == 'ours' else 1.4, ms=6 if m == 'ours' else 4.5, label=name)
+                if P is not None:
+                    ci = [boot_ci({sid: d.get(q) for sid, d in P.get((m, vc, split), {}).items()}, pm) for vc in VCS]
+                    yerr = [[max(yy - lo, 0) if np.isfinite(lo) else 0 for yy, (_, lo, _h) in zip(y, ci)],
+                            [max(hi - yy, 0) if np.isfinite(hi) else 0 for yy, (_, _l, hi) in zip(y, ci)]]
+                    ax.errorbar(np.array(VCS) * 2.0 ** offs[i], y, yerr=yerr, fmt=mk, color=c, lw=2.0 if m == 'ours' else 1.4,
+                                ms=6 if m == 'ours' else 4.5, capsize=2, elinewidth=0.9, capthick=0.9, label=name)
+                else:
+                    ax.plot(VCS, y, mk, color=c, lw=2.0 if m == 'ours' else 1.4, ms=6 if m == 'ours' else 4.5, label=name)
             ax.set_xscale('log', base=2); ax.set_xticks(VCS); ax.set_xticklabels(VCS)
             ax.set_xlabel('number of visible electrodes $N$'); ax.set_ylabel(ylab); ax.set_title(f'{lab} dataset', fontsize=10)
             ax.grid(alpha=0.25, lw=0.5); ax.legend(frameon=False, fontsize=7.5, ncol=2, loc='lower right' if kind == 'bsp' else 'best')
-            out = os.path.join(FIG_DIR_V2, f'fig_baselines_{kind}_{lab}{lay}_v2.png'); fig.savefig(out, dpi=150); plt.close(fig); print('wrote', os.path.basename(out))
+            out = os.path.join(FIG_DIR_V2, f'fig_baselines_{kind}_{lab}{lay}_v2.png'); fig.savefig(out, dpi=FIG_DPI); plt.close(fig); print('wrote', os.path.basename(out))
 
 
 if __name__ == '__main__':
@@ -264,7 +322,7 @@ if __name__ == '__main__':
     means_tables(M)
     res = sig_table(P)
     if REF == 'commercial':
-        figures(M)
+        figures(M, P)
     json.dump({'means': {f'{m}|{vc}|{s}|{q}': v for (m, vc, s, q), v in M.items()}, 'sig': res},
               open(assert_v2(os.path.join(V2_GENERATED, f'results{sfx_lay()}_v2.json')), 'w'), indent=1)
     print('done', REF, LAYOUT)

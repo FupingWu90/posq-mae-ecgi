@@ -13,6 +13,7 @@ import numpy as np, pandas as pd
 from scipy.stats import wilcoxon
 V2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(V2, 'bsp_reconstruction')); sys.path.insert(0, os.path.join(V2, 'inverse_evaluation'))
+from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
 from paths import V1_ROOT, V2_GENERATED, assert_v2
 from cache_references import cache_lookup, vc_tag
 from mesh_io import load_surface, find_patient_files
@@ -99,7 +100,7 @@ def main():
                     continue
                 sid_safe = os.path.basename(f)[:-4]
                 sid = next((s for s in recs if s.replace('/', '_') == sid_safe), None)
-                if sid is None:
+                if sid is None or not _dedup_ok(sid):
                     continue
                 gdir = os.path.dirname(recs[sid][2])
                 if gdir not in mesh_cache:

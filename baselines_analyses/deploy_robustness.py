@@ -28,6 +28,7 @@ for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
 V2 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(V2, 'bsp_reconstruction')); sys.path.insert(0, os.path.join(V2, 'inverse_evaluation'))
 sys.path.insert(0, os.path.join(V2, 'baselines_analyses'))
+from dedup import ok as _dedup_ok   # one recording per content key (bsp_reconstruction/dedup.py; 2026-10-21)
 import numpy as np
 import torch
 from scipy.stats import wilcoxon
@@ -88,7 +89,7 @@ def recordings(n):
     for split in SPLITS:
         recs = [r for r in buckets[split] if r[2]]
         idx = np.linspace(0, len(recs) - 1, n).astype(int)
-        out[split] = [recs[i] for i in idx]
+        out[split] = [recs[i] for i in idx if _dedup_ok(recs[i][0])]   # the sub-sample is otherwise unchanged (2026-10-21)
     return out
 
 
@@ -309,7 +310,8 @@ def aggregate(recs_by_split):
                     ov[f'{ca}_vs_{cb}'] = {'mean': float(np.mean(o)), 'min': int(min(o)), 'max': int(max(o)), 'n_identical': int(sum(x == VC for x in o))}
             out['overlap'][f'{grp}|{split}'] = ov
             arr = {m: {c: np.array([_nan(data[s][c].get(m, {}).get('at')) for s in sids]) for c in conds} for m in METHODS}
-            arr_rt = {m: {c: np.array([_nan(data[s][c].get(m, {}).get('rt')) for s in sids]) for c in conds} for m in METHODS}
+            from tgate_rule import ok as _tgate_ok   # RT only where the commercial T-gate holds >= 3 vertices (2026-10-20)
+            arr_rt = {m: {c: np.array([_nan(data[s][c].get(m, {}).get('rt')) if _tgate_ok(split, s, 'commercial') else np.nan for s in sids]) for c in conds} for m in METHODS}
             per = {}
             for m in METHODS:
                 e = {}

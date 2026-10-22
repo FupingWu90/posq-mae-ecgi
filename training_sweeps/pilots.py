@@ -64,7 +64,7 @@ PILOTS = {
              'LOC3 without the temporal-smoothness loss (w_t = 0): does the output head replace it?'),
     'LOC3D': (['--head', 'subattn', '--inner_depth', '2'], True, 'LOC3 with two sub-token blocks in the output head'),
     'LOC5': (['--head', 'subattn', '--inner_depth', '1', '--w_temporal', '1'], True,
-             'LOC3 with w_t = 1: compromise between the smoothness loss (LOC3, w_t = 3) and none (LOC4); user request 2026-10-06'),
+             'LOC3 with w_t = 1: compromise between the smoothness loss (LOC3, w_t = 3) and none (LOC4)'),
     # ---- hyper-parameter checks on the base decoder (run after the pilots above) ----
     'DEC4': (['--query_frac', '0.5'], True, 'training cost: half of the masked electrodes decoded per training step'),
     'EPL3': (['--head', 'subattn', '--inner_depth', '1', '--epochs', '1600'], True,

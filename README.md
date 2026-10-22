@@ -1,7 +1,8 @@
 # PosQ-MAE: few-electrode electrocardiographic imaging with a position-queried masked autoencoder
 
-Experiment code for *"Generalisable ECGi Body-Surface Potential Completion in Real-World Clinical
-Recordings with a Position-Queried Masked Autoencoder"*.
+Experiment code and released weights for *"Sixteen electrodes approximate full-vest
+electrocardiographic imaging in real-world clinical recordings"* (PosQ-MAE, a position-queried masked
+autoencoder).
 
 PosQ-MAE completes the full 252-channel body-surface potential (BSP) field of an ECGi vest from
 only *N* measured electrodes. An encoder reads the measured electrodes, each token carrying a
@@ -16,8 +17,9 @@ inverse computed from all valid vest electrodes, on an internal and on a held-ou
 
 > **Data are not included.** The recordings are clinical data that cannot be redistributed. All
 > cohort identifiers in this repository are anonymised (`cohortA`, `cohortB` = the two internal
-> sub-cohorts of one centre; `external` = the held-out external centre). Trained weights are not
-> distributed either (see the paper's data and code availability statement).
+> sub-cohorts of one centre; `external` = the held-out external centre). The trained weights of the
+> final model (*N* = 16, training seed 42) are included in `results/final_model/` (see *Released
+> weights* below).
 
 This release supersedes the PPE-MAE code of the first manuscript version (kept as the `v1`
 predecessor, see *Previous release* below): the model is new (`bsp_reconstruction/models_v2.py`),
@@ -117,6 +119,21 @@ from the configuration (`runs/data-cohortA+cohortB_vs_external/<tag>__<model>_vc
 contain `args.json`, `checkpoints/`, `test_compare.json` (held-out BSP metrics under every
 selection mode, including the fixed template) and the downstream results of the requested splits.
 
+**Released weights.** `results/final_model/` holds the checkpoint of the final model reported in the
+paper (*N* = 16, training seed 42, selected on the validation split under the fixed template layout):
+`args.json` (the complete configuration), `keep_idx.npy` (the 252 retained channels) and
+`checkpoints/checkpoint_best.pth` (model weights only, 5.46 M parameters, about 22 MB). Install it as
+the run directory `runs/data-cohortA+cohortB_vs_external/FINAL__.../` that the evaluation scripts
+expect, then evaluate it:
+
+```bash
+python bsp_reconstruction/install_final_model.py        # --link symlinks instead of copying
+bash training_sweeps/eval_test_runs.sh FINAL              # both test cohorts x both deployment layouts
+```
+
+The weights were trained on the clinical recordings and contain no patient data. The two further
+training seeds (P3S43, P3S44) and the ablation runs are not distributed.
+
 **Deployment layouts.** Every model is evaluated under (i) the fixed template layout
 (`bsp_reconstruction/templates/template_vc<N>.npz`: k-means medoids of the mean normalised
 electrode positions of the training geometries, with nearest-available substitution of missing
@@ -192,6 +209,24 @@ The cohort clinical-characteristics table and the stratified analyses by acquisi
 duration were derived from the study case-report tables, which are patient data; the scripts that
 read them are not distributed. They operate on the per-recording CSVs produced above.
 
+### Channel-loss experiments and patient hold-out (2026-10-20)
+
+```bash
+# observed channel loss: strata of the number of valid electrodes, threshold sweep, binned curves (both layouts)
+python baselines_analyses/heavy_loss_strata.py
+# emulated heavy loss: an extra 25 / 50 / 75 % of the active channels of every test recording flagged missing
+# before preprocessing and selection; the reduced vest's own inverse becomes the extra source 'src2_reduced'
+bash training_sweeps/run_extra_loss.sh            # calls inverse_evaluation/eval_downstream.py --extra_loss 0.25 --extra_loss_seed 1 ...
+python baselines_analyses/extra_loss_summary.py   # tables / figure of the emulated-loss experiment
+# training with a patient hold-out (one data-folder name per line); the held-out recordings form the role 'holdout'
+python bsp_reconstruction/train.py ... --holdout_file my_holdout.txt
+python inverse_evaluation/eval_downstream.py --run_dir <run> --split holdout --n 1000000 --vc 16 --mode template --out holdout.csv
+bash training_sweeps/eval_holdout_runs.sh <RUN_ID>          # the same for both layouts -> results/percase_holdout/
+python inverse_evaluation/cache_references.py --run_dir <run> --split holdout   # reference cache (all-valid inverse, commercial maps) of the held-out recordings
+python baselines_analyses/holdout_summary.py --id <RUN_ID>  # aggregates of the held-out patients next to the internal test set (both layouts)
+bash training_sweeps/eval_classical_holdout.sh               # Laplacian / TPS / LMMSE on the hold-out split, LMMSE covariance refitted without the held-out patients
+```
+
 ## Previous release
 
 The learned baselines of the paper (the v1 PPE-MAE model, the ST-MEM-style index-embedding model and
@@ -217,8 +252,12 @@ release list their configurations).
 
 ## Citation
 
-If you use this code, please cite the paper (reference to be added upon publication).
+If you use this code or the released weights, please cite the paper:
+
+> F. Wu et al., *Sixteen electrodes approximate full-vest electrocardiographic imaging in real-world
+> clinical recordings*, 2026 (submitted). Code and weights: https://github.com/FupingWu90/posq-mae-ecgi
+> (archived release: Zenodo DOI to be added).
 
 ## License
 
-To be decided by the authors before public release.
+MIT License; see `LICENSE`.
