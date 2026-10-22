@@ -1,0 +1,12 @@
+{
+ "flags": [],
+ "epo_run": false,
+ "reason": "base run not converging any more at 800 epochs by the rule; 800 epochs kept",
+ "convergence_of_base_run": {
+  "still": false,
+  "best_epoch": 760,
+  "gain_last_200": 0.0010339999999999794,
+  "gain_second_half": 0.007071999999999967,
+  "base_val_mae": 0.601816
+ }
+}

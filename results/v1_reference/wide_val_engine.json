@@ -1,0 +1,15 @@
+{
+ "run": "fixedn_ecgi_wide_vc16_cluster-greedy_val-cluster-kmean_nm-gl_ws0-wt3-rw100_sc-recon_k6s10_ebs64_crop5000_ep800",
+ "val_template": {
+  "mae": 0.6030080021833474,
+  "rmse": 1.9533227029836402,
+  "cc": 0.865786227901028,
+  "n_samples": 106
+ },
+ "val_kmeans": {
+  "mae": 0.6406585345009588,
+  "rmse": 2.0812417156291456,
+  "cc": 0.8624846013632156,
+  "n_samples": 106
+ }
+}
