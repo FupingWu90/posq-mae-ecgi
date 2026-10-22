@@ -1,0 +1,27 @@
+# Experiment outputs that a user generates in a clone (not part of the release)
+runs/
+cache/
+data/
+figures/
+v1/
+results/val_percase/*
+!results/val_percase/.gitkeep
+results/pilots_overview.json
+inverse_evaluation/cache_hsp/*/
+inverse_evaluation/spatial_out/
+inverse_evaluation/spatial_figs/
+inverse_evaluation/validate_out/
+inverse_evaluation/out_matrix/
+baselines_analyses/generated/*
+!baselines_analyses/generated/.gitkeep
+training_sweeps/logs/*
+!training_sweeps/logs/.gitkeep
+training_sweeps/failed/
+__pycache__/
+.DS_Store
+*.pyc
+*.log
+*.out
+train_run.out
+# The released weights (results/final_model/checkpoints/checkpoint_best.pth) and the template layouts
+# (bsp_reconstruction/templates/*.npz) are part of the repository: do NOT add "*.pth" or "*.npz" rules.
