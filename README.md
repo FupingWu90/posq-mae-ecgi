@@ -250,6 +250,90 @@ release list their configurations).
 * The template layouts in `bsp_reconstruction/templates/` are aggregates (mean electrode geometry of
   the training vest fits, k-means medoid indices); they contain no patient-specific information.
 
+## Model card
+
+A one-page summary in the "model facts" format recommended by the MI-CLAIM-GEN checklist (Miao et
+al., *Nat Med* 2025). The paper and its Supplementary Notes are the authoritative source for every
+number below.
+
+**Model summary.** PosQ-MAE, position-queried masked autoencoder for body-surface potential
+completion; final configuration of the paper (*N* = 16, training seed 42). Developed by the authors
+(Imperial College London); contact: the corresponding author of the paper. Version v1.0.2 of this
+repository (code and weights; archived at https://doi.org/10.5281/zenodo.23574653); model card added
+2026-10-24. Regulatory status: none — research software, not a medical device.
+
+**Intended use.**
+
+* *Input:* a 5-s window of body-surface potentials from *N* measured electrodes (templates released
+  for *N* = 4, 8, 16, 32 and 64; evaluated primarily at *N* = 16), each with its 3-D position
+  registered in the patient's torso geometry (the vest frame of the acquisition system), after the
+  released preprocessing (filtering, missing-channel detection, one per-recording amplitude scale
+  computed from the measured electrodes).
+* *Output:* the completed 252-channel body-surface field at the vest electrode positions, or at
+  arbitrary queried torso positions, as the input of a standard ECGi inverse (the released MFS
+  inverse) from which activation and repolarisation maps and clinical endpoints are derived.
+* *Users and setting:* research use by ECGi and electrophysiology groups. The paper evaluated it
+  during cardiac-device implantation (intrinsic rhythm; His-bundle, left-bundle-branch-area,
+  right-ventricular and biventricular pacing) and in patients with hypertrophic cardiomyopathy
+  recorded after exercise.
+* *Out of scope:* other electrode systems or unregistered electrode positions (the position code
+  transfers to positions never seen in training, but only vest-frame geometries were tested);
+  atrial activation and atrial arrhythmias (the model and the markers work on the QRS–T window);
+  patients without a torso–heart geometry; recordings shorter than 5 s; any clinical decision-making
+  — the completion feeds a research inverse and has not been validated prospectively with
+  physically sparse electrodes.
+
+**Development.** Transformer encoder over the measured electrodes with a physical position
+embedding (an MLP of the normalised 3-D coordinates), position-queried cross-attention decoder and
+sub-token output head; 5.46 M parameters; trained from scratch and self-supervised (reconstruction
+of masked electrodes of full-vest recordings; no labels, no pretrained base model, no external
+tools). Training data: 760 recordings of 48 patients from one centre and one acquisition system
+(252-electrode vest, 1 kHz; cardiac-device implantation with intrinsic and temporarily paced rhythms;
+acquired 2019–2025); model selection on 106 recordings of 5 further patients; patient-level split.
+Compute: 800 epochs, 7.3 h on one 32-GB GPU (NVIDIA RTX 5000 Ada); inference 39 ms per recording
+on the GPU or 0.8 s on eight CPU threads (about 2.5 s end to end with the inverse and the markers
+on the CPU).
+
+**Validation and performance** (*N* = 16, fixed template layout; mean absolute error of the
+epicardial activation-time (AT) and repolarisation-time (RT) maps against the commercial full-vest
+maps, ms; the value of the full-vest inverse itself in parentheses):
+
+| Validation | Patients (recordings) | Field correlation at held-out electrodes | AT | RT |
+|---|---|---|---|---|
+| Internal test (same centre, held-out patients) | 11 (275) | 0.87 | 13.1 (14.7) | 27.0 (38.5) |
+| External (held-out cohort; hypertrophic cardiomyopathy, exercise protocol) | 202 (251) | 0.94 | 9.1 (7.9) | 20.2 (16.2) |
+| Replication split (9 further patients; model retrained without them) | 9 (129) | 0.92 | 14.7 (13.8) | 30.0 (31.2) |
+
+Clinical endpoints from 16 electrodes (total and left-ventricular activation time, dyssynchrony and
+uncoupling) agree with the full-vest maps within pre-specified margins (±10 ms for activation-time
+measures, ±5 ms for dispersion indices; ICC 0.72–0.98), and within-patient comparisons between
+pacing states from 16 electrodes agree with the commercial reference as often as those from the
+full-vest inverse. Primary metric: activation-time error against the commercial reference;
+secondary: repolarisation time, held-out field correlation, endpoint agreement.
+
+**Warnings.**
+
+* The repolarisation gain over the raw full-vest inverse was seen only on the noisier internal
+  recordings; on clean recordings (external cohort, replication split) the completion costs 1–2 ms
+  of activation accuracy against the full vest.
+* Sensitive to in-band noise on the measured electrodes: at 5 dB white noise the internal
+  repolarisation advantage disappears and 10 dB EMG-band noise removes most of it; activation
+  accuracy degrades more slowly than that of interpolation.
+* Right-ventricular activation time is unreliable for every source on the internal cohort (even two
+  full-vest solutions disagree).
+* Electrode-position errors up to 10 mm have no measurable effect; 40 mm (more than one electrode
+  spacing) adds 0.3–0.7 ms of activation error. Template electrodes that have failed are replaced by
+  their nearest valid neighbour; a physically sparse array has no such neighbour (the variant without
+  substitution is reported in the paper).
+* Fairness and generalisation: the completion cost did not differ by sex or age group in the
+  external cohort; the internal test set is too small to tell. Single centre, single acquisition
+  system, no prospective validation.
+* The per-recording reliability flag described in the paper needs the two further training seeds,
+  which are not distributed.
+
+**Other information.** Citation: see *Citation* below. License: MIT (code and weights). The weights
+contain no patient data; the clinical recordings are not distributed.
+
 ## Citation
 
 If you use this code or the released weights, please cite the paper:
