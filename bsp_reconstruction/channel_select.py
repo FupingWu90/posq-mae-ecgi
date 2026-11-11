@@ -59,7 +59,7 @@ import numpy as np
 
 MODES = ('cluster', 'patch', 'random', 'template')
 CLUSTER_METHODS = ('greedy', 'kmean')
-REGIONS = ('all', 'front', 'back')
+REGIONS = ('all', 'front', 'back', 'subA', 'subB')   # subA/subB: fixed index halves of the kept channels (off-grid A/B test, 2026-10-23; baselines_analyses/offgrid_ab.py)
 
 # Anterior convention of the cohort -- MUST match inverse_evaluation/heart_coords.py
 # (AP_AXIS, ANT_SIGN there: antero-posterior axis = coordinate column 1, the heart
@@ -87,6 +87,10 @@ def region_mask(coords, region='all'):
     if region == 'all':
         return np.ones(C, dtype=bool)
     ok = _coord_valid(coords)
+    if region in ('subA', 'subB'):
+        m = subset_mask(region)
+        assert m.shape[0] == C, f'subset built for {m.shape[0]} channels, got {C}'
+        return ok & m
     ap = ANT_SIGN * np.asarray(coords)[:, AP_AXIS]
     return ok & ((ap > 0) if region == 'front' else (ap <= 0))
 
@@ -101,26 +105,45 @@ def region_mask(coords, region='all'):
 # by the nearest available electrode (active, registered, not yet used). The mode
 # is deterministic and consumes no RNG.
 _TEMPLATES = {}
+TEMPLATE_SUBSTITUTE = True   # False (2026-10-23, reviewer point 4a): a missing template electrode is simply dropped (N_eff <= N)
 _TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
 
-def load_template(vc):
-    """(idx (vc,) int64 into the kept channels, mean_xyz (C,3) float32)."""
+_SUBSET_MASKS = {}
+
+
+def subset_mask(name):
+    """(C,) bool -- fixed index subset 'subA' / 'subB' of the kept channels (bsp_reconstruction/templates/subset_AB.npz, built by
+    baselines_analyses/offgrid_ab.py --build; off-grid A/B test of the position code, 2026-10-23)."""
+    if name not in _SUBSET_MASKS:
+        with np.load(os.path.join(_TEMPLATE_DIR, 'subset_AB.npz')) as z:
+            _SUBSET_MASKS['subA'] = z['subA'].astype(bool); _SUBSET_MASKS['subB'] = z['subB'].astype(bool)
+    return _SUBSET_MASKS[name]
+
+
+def load_template(vc, region='all'):
+    """(idx (vc,) int64 into the kept channels, mean_xyz (C,3) float32).  region 'subA'/'subB': the template built
+    inside that index subset (template_vc<N>_sub<X>.npz); cache key vc (region 'all') or (vc, region)."""
     vc = int(vc)
-    if vc not in _TEMPLATES:
-        with np.load(os.path.join(_TEMPLATE_DIR, f'template_vc{vc}.npz')) as z:
-            _TEMPLATES[vc] = (z['idx'].astype(np.int64), z['mean_xyz'].astype(np.float32))
-    return _TEMPLATES[vc]
+    key = vc if region == 'all' else (vc, region)
+    if key not in _TEMPLATES:
+        fname = f'template_vc{vc}.npz' if region == 'all' else f'template_vc{vc}_{region}.npz'
+        with np.load(os.path.join(_TEMPLATE_DIR, fname)) as z:
+            _TEMPLATES[key] = (z['idx'].astype(np.int64), z['mean_xyz'].astype(np.float32))
+    return _TEMPLATES[key]
 
 
-def template_select(coords, active_mask, vc, k=None):
+def template_select(coords, active_mask, vc, k=None, region='all'):
     """Visible mask of the fixed template layout for one recording.
-    Returns (visible (C,) bool, n_substituted)."""
-    idx, mean_xyz = load_template(vc)
+    Returns (visible (C,) bool, n_substituted).  With region 'subA'/'subB' the subset template is used and
+    substitutes are restricted to the subset."""
+    idx, mean_xyz = load_template(vc, region)
     C = coords.shape[0]
     assert mean_xyz.shape[0] == C, f'template built for {mean_xyz.shape[0]} channels, got {C}'
     reg = _coord_valid(coords)
     avail = np.asarray(active_mask, bool) & reg
+    if region != 'all':
+        avail &= region_mask(coords, region)
     vis = np.zeros(C, dtype=bool)
     nsub = 0
     kmax = len(idx) if k is None else int(k)
@@ -129,6 +152,9 @@ def template_select(coords, active_mask, vc, k=None):
             break
         if avail[c] and not vis[c]:
             vis[c] = True
+            continue
+        if not TEMPLATE_SUBSTITUTE:
+            nsub += 1
             continue
         target = coords[c] if reg[c] else mean_xyz[c]
         d = np.linalg.norm(coords - target, axis=1)
@@ -201,9 +227,9 @@ def select_visible_channels(coords, active_mask, vc, mode='cluster',
 
     # TEMPLATE (v2): fixed predetermined layout, nearest-available substitution.
     if mode == 'template':
-        if region != 'all':
-            raise ValueError("mode='template' supports region='all' only")
-        visible, nsub = template_select(coords, active_mask, vc, k=k)
+        if region not in ('all', 'subA', 'subB'):
+            raise ValueError("mode='template' supports region='all' (or the index subsets 'subA'/'subB') only")
+        visible, nsub = template_select(coords, active_mask, vc, k=k, region=region)
         info['n_template_sub'] = int(nsub)
         short = k - int(visible.sum())
         if short > 0 and len(fill) > 0:   # last resort: coordinate-less active channels

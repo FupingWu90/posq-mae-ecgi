@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bsp_reconstruction')
 sys.path.insert(0, _CODE)
 import torch
-from build_sources import load_model, build_context, reconstruct_sources, CROP, held_out_bsp_cc
+from build_sources import load_model, build_context, reconstruct_sources, CROP, held_out_bsp_cc, _to256
+import channel_select
 from inverse import assemble_solver, solve_from_field
 from metrics import temporal_cc, scale_ratio, map_errors, hsp_metrics
 from at_rt import extract_sample, good_vertex_mask
@@ -55,7 +56,7 @@ def gt_epicardial(gt, L):
 
 
 def evaluate(run_dir, n=20, vc=16, mode='cluster', cluster_method='kmean', seed=42,
-             out_csv=None, verbose=True):
+             out_csv=None, verbose=True, noise=None, cross=False):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, keep_idx, args = load_model(run_dir, device)
     buckets, _ = collect_split(seed=args.get('seed', 42))
@@ -78,7 +79,7 @@ def evaluate(run_dir, n=20, vc=16, mode='cluster', cluster_method='kmean', seed=
             n_h = heart_V.shape[0]
             assert n_h == int(gt['n_epi']), (n_h, gt['n_epi'])
             ctx = build_context(ecgpath, torsopath, keep_idx, args, vc=vc, mode=mode,
-                                cluster_method=cluster_method, seed=seed)
+                                cluster_method=cluster_method, seed=seed, noise=noise)   # noise: channel-independent, injected on the active channels (2026-10-25)
             if ctx is None:
                 continue
             s0 = ctx['crop_start']; L = ctx['L']
@@ -96,6 +97,19 @@ def evaluate(run_dir, n=20, vc=16, mode='cluster', cluster_method='kmean', seed=
             recon = reconstruct_sources(model, ctx, device)
             phi['src4_recon_valid'] = solve_from_field(solver, torso_ch_idx, *recon['src4_recon_valid'])[0]
             bsp_cc, _ = held_out_bsp_cc(ctx, recon['recon252'])
+            if cross:   # cross-completion of the valid electrodes in two random halves (as baselines_analyses/sources_rerun_v2.py --model_denoise cross)
+                import zlib
+                rng_h = np.random.default_rng(seed * 1000003 + zlib.crc32(os.path.basename(ecgpath).encode()))
+                reg_act = np.where(ctx['active252'] & channel_select._coord_valid(ctx['coords']))[0]
+                perm = rng_h.permutation(len(reg_act)); halves = (reg_act[perm[: len(perm) // 2]], reg_act[perm[len(perm) // 2:]])
+                f252 = ctx['prep252'].copy()
+                for h_vis, h_hid in ((halves[0], halves[1]), (halves[1], halves[0])):
+                    c = dict(ctx); vis_h = np.zeros(len(ctx['active252']), bool); vis_h[h_vis] = True
+                    c['visible252'] = vis_h; c['n_vc'] = int(vis_h.sum())
+                    g_h = float(torch.from_numpy(c['prep252'][vis_h]).std(dim=1).median()); c['g'] = g_h if g_h > 1e-8 else 1.0
+                    r_h = reconstruct_sources(model, c, device)
+                    f252[h_hid] = r_h['recon252'][h_hid].astype(np.float32)
+                phi['src6_mdn'] = solve_from_field(solver, torso_ch_idx, *_to256(f252, ctx['active252'], keep_idx))[0]
             # BSP CC against the CLEAN field on the held-out electrodes
             clean = gt['bsp_clean'].astype(np.float32)[:, s0:s0 + CROP]
             held = ctx['active252'] & ~ctx['visible252']
@@ -106,7 +120,7 @@ def evaluate(run_dir, n=20, vc=16, mode='cluster', cluster_method='kmean', seed=
                     ccs.append(float(np.corrcoef(a_, b_)[0, 1]))
             bsp_cc_clean = float(np.mean(ccs)) if ccs else float('nan')
             meta = json.loads(str(gt['meta']))
-            for sname in COMPARE:
+            for sname in COMPARE + (['src6_mdn'] if cross else []):
                 ps = phi.get(sname)
                 row = dict(sid=sid, source=sname, kind=meta.get('kind'), n_active=ctx['n_active'],
                            n_vc=ctx['n_vc'], n_recon=ctx['n_recon'], n_h=int(n_h),
@@ -183,6 +197,9 @@ if __name__ == '__main__':
     p.add_argument('--cluster_method', default='kmean')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--out', default=None)
+    p.add_argument('--noise', nargs=2, default=None, metavar=('KIND', 'SNR_DB'), help='inject channel-independent noise (white|emg|bw, SNR dB) on the active channels before every source (2026-10-25)')
+    p.add_argument('--noise_seed', type=int, default=0)
+    p.add_argument('--cross', action='store_true', help='add the cross-completion source src6_mdn (two random halves, each completed from the other)')
     a = p.parse_args()
     evaluate(a.run_dir, n=a.n, vc=a.vc, mode=a.mode, cluster_method=a.cluster_method,
-             seed=a.seed, out_csv=a.out)
+             seed=a.seed, out_csv=a.out, noise=((a.noise[0], float(a.noise[1]), a.noise_seed) if a.noise else None), cross=a.cross)

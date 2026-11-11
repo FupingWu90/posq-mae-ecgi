@@ -82,6 +82,7 @@ def main():
     ap.add_argument('--alphas', type=float, nargs='*', default=[0, 5, 10, 20, 40])
     ap.add_argument('--layouts', nargs='*', default=['template', 'kmeans'])
     ap.add_argument('--figs', action='store_true', help='only draw the figures from the existing JSON')
+    ap.add_argument('--dump_percase', default=None, help='write the per-recording BSP metrics of every (layout, model, angle) to this CSV and leave the JSON untouched (Source Data, 2026-10-27)')
     a = ap.parse_args()
     if a.figs:
         make_figs(); return
@@ -108,7 +109,7 @@ def main():
         recs = [recs[i] for i in np.linspace(0, len(recs) - 1, a.n).astype(int)]
         acc = {(lay, key, al): [] for lay in a.layouts for key in models for al in a.alphas}
         disp_acc = {(lay, al): [] for lay in a.layouts for al in a.alphas}
-        n_done = 0
+        n_done = 0; prow = []
         for k, rec in enumerate(recs):
             ctx = build_context(rec[1], rec[2], keep_idx, args0, vc=VC, mode='template', cluster_method='greedy', seed=42)
             if ctx is None:
@@ -132,6 +133,9 @@ def main():
                     for key, m in models.items():
                         cd = coords_p if key[0] == 'ppe' else coords
                         acc[(lay, key, al)].append(recon_metrics(m, device, prep_p, cd, act_p, vis_p, g))
+                        if a.dump_percase:
+                            prow.append(dict(sid=rec[0], split=split, layout=lay, arm=key[0], model=key[1], alpha_deg=al, disp_spacings=float(disp / spacing),
+                                             mae=float(acc[(lay, key, al)][-1][0]), cc=float(acc[(lay, key, al)][-1][1])))
             n_done += 1
             if (k + 1) % 20 == 0:
                 print(f'[{split}] {k+1}/{len(recs)}', flush=True)
@@ -152,7 +156,15 @@ def main():
                                                        'cc_max': float(np.max([R[lay][f'{arm}|{p}'][str(al)]['cc'] for p in pids])),
                                                        'n_seeds': len(pids)} for al in a.alphas}
         res[split] = R
-    json.dump(res, open(assert_v2(OUT), 'w'), indent=1)
+        if a.dump_percase:
+            import csv as _csv
+            new = not os.path.exists(a.dump_percase)
+            with open(a.dump_percase, 'a', newline='') as fh:
+                w = _csv.DictWriter(fh, fieldnames=list(prow[0].keys())); (w.writeheader() if new else None); w.writerows(prow)
+    if a.dump_percase:
+        json.dump(res, open(a.dump_percase[:-4] + '_recomputed.json', 'w'), indent=1)   # for the check against the paper JSON; OUT is not overwritten
+    else:
+        json.dump(res, open(assert_v2(OUT), 'w'), indent=1)
     for split in ('test_internal', 'test_external'):
         for lay in a.layouts:
             R = res[split][lay]
@@ -183,7 +195,7 @@ def make_figs():
                 if all('cc_min' in R[arm][al] for al in alphas):
                     ax.fill_between(x, [R[arm][al]['cc_min'] for al in alphas], [R[arm][al]['cc_max'] for al in alphas], color=col, alpha=0.15, lw=0)
             ax.plot(x, [R['ppe|mean'][al]['cc'] for al in alphas], 's-', color='#0072B2', lw=2, ms=6,
-                    label='Ours (physical positions)')
+                    label='PosQ-MAE (physical positions)')
             ax.plot(x, [R['index|mean'][al]['cc'] for al in alphas], 'o--', color='#D55E00', lw=1.8, ms=6,
                     label='PosQ-MAE (index embedding)')
             ax.set_xlabel('coherent layout shift (electrode spacings)')

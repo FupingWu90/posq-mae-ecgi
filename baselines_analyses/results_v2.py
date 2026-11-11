@@ -26,7 +26,7 @@ SPLITS = ['test_internal', 'test_external']
 METS = ['AT', 'RT', 'ARI']
 OURS_ID = {4: 'P3N4', 8: 'P3N8', 16: 'LOC3', 32: 'P3N32', 64: 'P3N64'}
 STD = 'cluster-greedy_val-cluster-kmean_nm-gl_ws0-wt3-rw100_sc-recon_k6s10_ebs64_crop5000_ep800'
-COLS = [('ours', 'Ours'), ('stmem', 'ST-MEM'), ('mcma', 'MCMA'), ('lmmse', 'LMMSE'), ('laplacian', 'Laplace'), ('tps', 'TPS'), ('vconly', 'VC-only')]
+COLS = [('ours', 'PosQ-MAE'), ('stmem', 'Index-MAE'), ('mcma', 'MCMA'), ('lmmse', 'LMMSE'), ('laplacian', 'Laplace'), ('tps', 'TPS'), ('vconly', 'VC-only')]
 REF, LAYOUT = 'commercial', 'template'
 FIG_DPI = int(os.environ.get('ECGI_FIG_DPI', '150'))   # 2026-10-20: 300 for the npj figure files
 _PMAP = {}
@@ -176,6 +176,12 @@ def load_everything():
         for vc in VCS:
             P[('ours', vc, split)] = percase(ours_csv(vc, split), 'src4_recon_valid')
             P[('vconly', vc, split)] = percase(ours_csv(vc, split), 'src1_vc')
+            lc = os.path.join(V2_GENERATED, 'percase_rerun', f'lamcal_vc{vc}_{split}_template.csv')   # VC-only inverse with lambda calibrated per N on the validation split (user review 2026-10-25)
+            if LAYOUT == 'template' and os.path.exists(lc):
+                P[('vconly_cal', vc, split)] = percase(lc, 'src1_vc')
+                for q in METS + ['HSP']:
+                    M[('vconly_cal', vc, split, q)] = mean_of(P[('vconly_cal', vc, split)], q)
+                M[('vconly_cal', vc, split, 'BSP')] = None
             for key in ('stmem', 'mcma'):
                 P[(key, vc, split)] = percase(learned_csv(key, vc, split), 'src4_recon_valid')
             for m in ('lmmse', 'laplacian', 'tps'):
@@ -256,9 +262,9 @@ def sig_table(P):
     return res
 
 
-STY = {'ours': ('#0072B2', 's-', 'Ours'), 'stmem': ('#E69F00', 'o-', 'ST-MEM'), 'mcma': ('#56B4E9', 'D-', 'MCMA'),
+STY = {'ours': ('#0072B2', 's-', 'PosQ-MAE'), 'stmem': ('#E69F00', 'o-', 'Index-MAE'), 'mcma': ('#56B4E9', 'D-', 'MCMA'),
        'lmmse': ('#000000', 'v-', 'LMMSE'), 'laplacian': ('#CC79A7', '^--', 'Laplace'), 'tps': ('#7F7F7F', 'P--', 'TPS'),
-       'vconly': ('#D55E00', 'X:', 'VC-only')}
+       'vconly': ('#D55E00', 'X:', 'VC-only'), 'vconly_cal': ('#8C564B', 'x--', 'VC-only, calibrated $\\lambda$')}
 
 
 def figures(M, P=None):
@@ -284,7 +290,7 @@ def figures(M, P=None):
                 _, alo, ahi = boot_ci(allv, pm)
                 if np.isfinite(alo):
                     ax.axhspan(alo, ahi, color='#009E73', alpha=0.12, lw=0)
-            ax.axhline(allv_mean, color='#009E73', ls='--', lw=1.4, label='all-valid inverse (252)')   # legend entry instead of an in-plot label (2026-10-20)
+            ax.axhline(allv_mean, color='#009E73', ls='--', lw=1.4, label='full-vest inverse')   # legend entry instead of an in-plot label (2026-10-20); '(252)' dropped 2026-10-29 (flagged channels are excluded, so it is rarely all 252)
             ax.set_xscale('log', base=2); ax.set_xticks(VCS); ax.set_xticklabels(VCS)
             ax.set_xlabel('number of visible electrodes $N$'); ax.set_ylabel(f'epicardial {met} MAE vs commercial (ms)')
             ax.set_title(f'{lab} dataset', fontsize=10); ax.grid(alpha=0.25, lw=0.5)

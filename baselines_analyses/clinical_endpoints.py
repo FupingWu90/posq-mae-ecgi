@@ -158,7 +158,7 @@ def icc21(x, y):
 
 def cluster_boot_ci(d, pat, B=2000, seed=0, alpha=0.10, x=None, y=None):
     """percentile CI of the mean of d under patient-cluster resampling (TOST at alpha/2 per side <-> (1-alpha) CI);
-    with x, y also the percentile CI of ICC(2,1) under the same resampling."""
+    with x, y also the percentile 95% CI of ICC(2,1) under the same resampling."""
     rng = np.random.default_rng(seed); pats = np.array(sorted(set(pat))); idx = {p: np.where(np.asarray(pat) == p)[0] for p in pats}
     means = np.empty(B); iccs = np.full(B, np.nan)
     for b in range(B):
@@ -170,7 +170,7 @@ def cluster_boot_ci(d, pat, B=2000, seed=0, alpha=0.10, x=None, y=None):
     if x is None:
         return ci
     ok_ = np.isfinite(iccs)
-    return ci, ((float(np.quantile(iccs[ok_], alpha / 2)), float(np.quantile(iccs[ok_], 1 - alpha / 2))) if ok_.sum() > 10 else (np.nan, np.nan))
+    return ci, ((float(np.quantile(iccs[ok_], 0.025)), float(np.quantile(iccs[ok_], 0.975))) if ok_.sum() > 10 else (np.nan, np.nan))   # ICC: 95% CI (GRRAS; 2026-10-25); bias CI: (1-alpha) for TOST
 
 
 def agreement(src, ref, pat, margin):
@@ -187,7 +187,7 @@ def agreement(src, ref, pat, margin):
     return dict(n_rec=int(x.size), n_pat=len(pats), mean_ref=float(y.mean()), sd_ref=float(y.std(ddof=1)), mean_src=float(x.mean()),
                 bias=float(d.mean()), sd_diff=float(d.std(ddof=1)), loa_lo=float(d.mean() - 1.96 * d.std(ddof=1)), loa_hi=float(d.mean() + 1.96 * d.std(ddof=1)),
                 mae=float(np.abs(d).mean()), median_diff=float(np.median(d)), wilcoxon_p=wp, r=float(pearsonr(x, y)[0]), rho=float(spearmanr(x, y)[0]),
-                icc=icc21(x, y), icc_ci90_lo=ilo, icc_ci90_hi=ihi, bias_pat=float((xp - yp).mean()), sd_diff_pat=float((xp - yp).std(ddof=1)) if len(pats) > 1 else np.nan,
+                icc=icc21(x, y), icc_ci95_lo=ilo, icc_ci95_hi=ihi, bias_pat=float((xp - yp).mean()), sd_diff_pat=float((xp - yp).std(ddof=1)) if len(pats) > 1 else np.nan,
                 icc_pat=icc21(xp, yp), ci90_lo=lo, ci90_hi=hi, margin=margin, equivalent=bool(lo > -margin and hi < margin),
                 equivalence_bound=float(max(abs(lo), abs(hi))))
 
@@ -319,7 +319,7 @@ def tables(res, layouts):
             if not A1:
                 continue
             L.append(r'\midrule'); first = True
-            for ep in ('tat', 'lvat95', 'rvat95', 'lvdi', 'veu', 'at_sd', 'ari_mean', 'ari_sd'):
+            for ep in ('lvat95', 'tat', 'rvat95', 'lvdi', 'veu', 'at_sd', 'ari_mean', 'ari_sd'):   # LVAT first (clinical collaborators, 2026-10-22)
                 s = A1.get(f'ours-allvalid|{ep}'); c = A1.get(f'ours-commercial|{ep}'); fl = A1.get(f'allvalid-commercial|{ep}')
                 if not s:
                     continue
@@ -350,21 +350,38 @@ def tables(res, layouts):
     # condensed main-text table (fixed template layout; five endpoints; both test cohorts)
     L = [r'\begin{tabular}{llrrrrr}', r'\toprule',
          r'Cohort & Endpoint & Full vest, mean (SD) & \multicolumn{3}{c}{completion from $16$ electrodes $-$ full vest} & Two full-vest solutions \\',
-         r'\cmidrule(lr){4-6}\cmidrule(lr){7-7}', r' & & & bias [LoA] & ICC & 90\% CI of the bias & bias / ICC \\']
+         r'\cmidrule(lr){4-6}\cmidrule(lr){7-7}', r' & & & bias [LoA] & ICC & 90\% CI of the bias & bias [LoA] / ICC \\']
     for split in ('test_internal', 'test_external'):
         A1 = res['A1'].get(f'template|{split}')
         if not A1:
             continue
         L.append(r'\midrule'); first = True
-        for ep in ('tat', 'lvat95', 'lvdi', 'veu', 'ari_mean'):
+        for ep in ('lvat95', 'tat', 'lvdi', 'veu', 'ari_mean'):   # LVAT first (clinical collaborators, 2026-10-22)
             s = A1.get(f'ours-allvalid|{ep}'); fl = A1.get(f'allvalid-commercial|{ep}')
             if not s:
                 continue
             eq = r'$^{\dagger}$' if s['equivalent'] else ''
             L.append(f"{SHORT[split] if first else ''} & {LABEL[ep]} & {f1(s['mean_ref'])} ({f1(s['sd_ref'])}) & ${s['bias']:+.1f}$ [${s['loa_lo']:+.1f}$, ${s['loa_hi']:+.1f}$] & {f1(s['icc'], 2)} & "
-                     f"[${s['ci90_lo']:+.1f}$, ${s['ci90_hi']:+.1f}$]{eq} & " + (f"${fl['bias']:+.1f}$ / {f1(fl['icc'], 2)}" if fl else '--') + r' \\'); first = False
+                     f"[${s['ci90_lo']:+.1f}$, ${s['ci90_hi']:+.1f}$]{eq} & " + (f"${fl['bias']:+.1f}$ [${fl['loa_lo']:+.1f}$, ${fl['loa_hi']:+.1f}$] / {f1(fl['icc'], 2)}" if fl else '--') + r' \\'); first = False
     L += [r'\bottomrule', r'\end{tabular}']
     open(assert_v2(os.path.join(V2_GENERATED, 'tab_clinical_endpoints_npjdm_v2.tex')), 'w').write('\n'.join(L) + '\n')
+    # raw 16-electrode inverse: agreement with the full vest and with the commercial reference (2026-10-23, reviewer minor 7)
+    L = [r'\begin{tabular}{llrrrr}', r'\toprule',
+         r'Cohort & Endpoint & \multicolumn{2}{c}{raw $16$-electrode inverse $-$ full vest} & \multicolumn{2}{c}{raw $16$-electrode inverse $-$ commercial} \\',
+         r'\cmidrule(lr){3-4}\cmidrule(lr){5-6}', r' & & bias [LoA] & ICC & bias [LoA] & ICC \\']
+    for split in ('test_internal', 'test_external', 'holdout'):
+        A1 = res['A1'].get(f'template|{split}')
+        if not A1:
+            continue
+        L.append(r'\midrule'); first = True
+        for ep in ('lvat95', 'tat', 'rvat95', 'lvdi', 'veu', 'at_sd', 'ari_mean', 'ari_sd'):
+            a = A1.get(f'vconly-allvalid|{ep}'); c = A1.get(f'vconly-commercial|{ep}')
+            if not a:
+                continue
+            cell = lambda s: f"${s['bias']:+.1f}$ [${s['loa_lo']:+.1f}$, ${s['loa_hi']:+.1f}$] & {f1(s['icc'], 2)}"
+            L.append(f"{SHORT[split] if first else ''} & {LABEL[ep]} & {cell(a)} & " + (cell(c) if c else '-- & --') + r' \\'); first = False
+    L += [r'\bottomrule', r'\end{tabular}']
+    open(assert_v2(os.path.join(V2_GENERATED, 'tab_vconly_agreement_v2.tex')), 'w').write('\n'.join(L) + '\n')
     print('wrote clinical_endpoints_v2.json, tab_clinical_endpoints{,_km}_v2.tex, tab_pacing_concordance{,_km}_v2.tex, tab_clinical_endpoints_npjdm_v2.tex')
 
 

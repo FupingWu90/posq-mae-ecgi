@@ -162,7 +162,7 @@ if __name__ == '__main__':
     p.add_argument('--mode', default='cluster')
     p.add_argument('--cluster_method', default='greedy')
     p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--region', default='all', choices=['all', 'front', 'back'],
+    p.add_argument('--region', default='all', choices=['all', 'front', 'back', 'subA', 'subB'],
                    help='restrict the VC candidates to one torso half (tag gets _reg-<region>)')
     a = p.parse_args()
     cache_split(a.run_dir, a.split, n=a.n, vc=a.vc, mode=a.mode,

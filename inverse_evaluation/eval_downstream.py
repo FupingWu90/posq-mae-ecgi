@@ -18,6 +18,9 @@ Per-case rows also carry `region` and, for the src4 rows, `bsp_cc` = mean
 temporal Pearson CC of the model reconstruction vs the measured signal on the
 held-out (active, registered, not visible) electrodes.
 """
+import os
+for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+    os.environ.setdefault(_v, '3')   # BLAS threads per process (2026-10-23: parallel reruns oversubscribed the 32 cores)
 import os, sys, csv, argparse, warnings
 import numpy as np
 
@@ -307,7 +310,7 @@ if __name__ == '__main__':
     p.add_argument('--extra_loss', type=float, default=0.0,
                    help='emulated heavy channel loss: extra fraction of the ACTIVE channels flagged missing (2026-10-20)')
     p.add_argument('--extra_loss_seed', type=int, default=0)
-    p.add_argument('--region', default='all', choices=['all', 'front', 'back'],
+    p.add_argument('--region', default='all', choices=['all', 'front', 'back', 'subA', 'subB'],
                    help='restrict the deployment VC selection to one torso half')
     a = p.parse_args()
     evaluate(a.run_dir, split=a.split, n=a.n, vc=a.vc, mode=a.mode,

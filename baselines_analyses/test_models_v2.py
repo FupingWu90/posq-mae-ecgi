@@ -58,7 +58,7 @@ print(f'T1 encoder equivalence: max |diff| tokens {d1:.2e}, cls {d1c:.2e}  ->', 
 
 # ---------------- T2 ----------------
 with torch.no_grad():
-    loss2, pred2, Lr2, Ls2, Lt2 = v2.forward_fixedn(x, active, coords, vis, w_spatial=0.0, w_temporal=3.0, return_components=True)
+    loss2, pred2, Lr2, Ls2, Lt2 = v2.forward_fixedn(x, active, coords, vis, w_spatial=0.0, w_temporal=3.0, return_components=True)[:5]
     L1_v1 = v1.forward_loss(x.unsqueeze(1), pred2, mask, ~active)
     ps = v1.unpatchify(pred2).squeeze(1)
     _, Lt_v1 = v1.smoothness_loss(ps, x, vis, active, coords)
@@ -90,7 +90,7 @@ for kw in variants:
     m.train(); losses = []
     for step in range(2):                       # call 0 = pure electrode step, call 1 = mixed step
         with torch.amp.autocast('cuda'):
-            loss, pred, Lr, Ls, Lt = m.forward_fixedn(x, active, coords, vis, w_temporal=3.0, return_components=True)
+            loss, pred, Lr, Ls, Lt = m.forward_fixedn(x, active, coords, vis, w_temporal=3.0, return_components=True)[:5]
         loss.backward(); losses.append(loss.item())
     gn = sum(p.grad.abs().sum().item() for p in m.parameters() if p.grad is not None)
     nograd = [n for n, p in m.named_parameters() if p.requires_grad and p.grad is None]

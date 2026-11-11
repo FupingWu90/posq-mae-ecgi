@@ -272,8 +272,10 @@ class PosQMAE(FixedNReconECGi):
 
     def __init__(self, *args, dec_tsa=False, tsa_order='post', dec_ssa=False, tokenizer='linear', head='linear',
                  time_embed='sincos', ppe_type='mlp', tmask_mode='none', tmask_ratio=0.0, query_frac=1.0,
-                 sub_len=5, inner_dim=32, inner_depth=2, inner_heads=4, head_ctx=1, **kwargs):
+                 sub_len=5, inner_dim=32, inner_depth=2, inner_heads=4, head_ctx=1, diff_norm='l2', **kwargs):
         super().__init__(*args, **kwargs)
+        assert diff_norm in ('l1', 'l2')
+        self.diff_norm = diff_norm                # norm of the difference-matching loss (w_diff; reviewer minor point 5, 2026-10-23)
         assert self.patch_size[0] == 1
         assert tokenizer in ('linear', 'tnt', 'conv') and head in ('linear', 'subattn', 'convref')
         assert time_embed in ('sincos', 'learned') and ppe_type in ('mlp', 'fourier')
@@ -418,7 +420,7 @@ class PosQMAE(FixedNReconECGi):
     def forward_fixedn(self, x, active_mask, coords, visible_mask,
                        w_spatial=0.0, w_temporal=0.0,
                        reg_knn=6, reg_time_stride=10, reg_scope='recon',
-                       return_components=False):
+                       return_components=False, w_diff=0.0):
         if x.dim() == 4:
             x = x.squeeze(1)
         B, C, L = x.shape
@@ -487,7 +489,7 @@ class PosQMAE(FixedNReconECGi):
         pred_full = torch.zeros(B, C, T, S, dtype=torch.float32, device=dev)
         pred_full.scatter_(1, q_idx.view(B, nq, 1, 1).expand(B, nq, T, S), pred_q.float())
 
-        if w_spatial > 0.0 or w_temporal > 0.0:
+        if w_spatial > 0.0 or w_temporal > 0.0 or w_diff > 0.0:
             dec_elec = torch.zeros(B, C, dtype=torch.bool, device=dev).scatter_(1, q_idx, True)
             pred_signal = pred_full.view(B, C, L)
             if token_mode:
@@ -500,6 +502,15 @@ class PosQMAE(FixedNReconECGi):
             dt = x_hat[:, :, 1:] - x_hat[:, :, :-1]
             tw = pen.float().unsqueeze(-1)
             L_temporal = (dt.pow(2) * tw).sum() / (tw.sum() * max(L - 1, 1)).clamp_min(1.0)
+            if w_diff > 0.0:
+                # difference-MATCHING loss (reviewer minor point 5): the temporal first differences of the prediction are matched
+                # to those of the target on the decoded electrodes with ground truth, instead of (or in addition to) being penalised
+                gt = (pen & active_mask).float().unsqueeze(-1)
+                dd = dt - (x[:, :, 1:] - x[:, :, :-1])
+                dd = dd.pow(2) if self.diff_norm == 'l2' else dd.abs()
+                L_diff = (dd * gt).sum() / (gt.sum() * max(L - 1, 1)).clamp_min(1.0)
+            else:
+                L_diff = L_recon * 0.0
             if w_spatial > 0.0:
                 L_spatial, _ = self.smoothness_loss(pred_signal, x, visible_mask, active_mask & dec_elec,
                                                     coords, knn=reg_knn, time_stride=reg_time_stride,
@@ -507,12 +518,12 @@ class PosQMAE(FixedNReconECGi):
             else:
                 L_spatial = L_recon * 0.0
         else:
-            L_spatial = L_temporal = L_recon * 0.0
+            L_spatial = L_temporal = L_diff = L_recon * 0.0
 
-        loss = L_recon + w_spatial * L_spatial + w_temporal * L_temporal
+        loss = L_recon + w_spatial * L_spatial + w_temporal * L_temporal + w_diff * L_diff
         pred = pred_full.view(B, C * T, S)
         if return_components:
-            return loss, pred, L_recon.detach(), L_spatial.detach(), L_temporal.detach()
+            return loss, pred, L_recon.detach(), L_spatial.detach(), L_temporal.detach(), L_diff.detach()
         return loss, pred
 
     # ---- continuous field: decode arbitrary torso positions ----------------------
@@ -578,7 +589,7 @@ POSQ_MODELS = ('posq_ecgi_base', 'posq_ecgi_wide', 'posq_ecgi_deep', 'posq_ecgi_
 V2_OPTS = dict(dec_tsa=False, tsa_order='post', dec_ssa=False, tokenizer='linear', head='linear', time_embed='sincos', ppe_type='mlp',
                tmask_mode='none', tmask_ratio=0.0, query_frac=1.0, dec_depth=None,
                sub_len=5, inner_dim=32, inner_depth=2, head_ctx=1,
-               enc_depth=None, dec_dim=None, dec_heads=None)
+               enc_depth=None, dec_dim=None, dec_heads=None, diff_norm='l2')
 
 
 def build_model(args, n_keep):

@@ -78,7 +78,7 @@ def assemble_solver(geom_dir, alpha_in=ALPHA_IN, alpha_out=ALPHA_OUT):
 
 
 def solve_from_field(solver, torso_ch_idx, V256, active256, lam=None, car=True,
-                     lam_floor=LAM_FLOOR):
+                     lam_floor=LAM_FLOOR, neumann_all=False):
     """Inverse-solve for a 256-channel PREPROCESSED body-surface field.
 
     V256      : (256, T) preprocessed potentials (physical units)
@@ -93,7 +93,7 @@ def solve_from_field(solver, torso_ch_idx, V256, active256, lam=None, car=True,
         return None, None, None, active_mask_t, n_active
     if car:
         V_torso = common_average_reference(V_torso, active_mask_t)
-    sysA = solver.factorize(V_torso, active_mask=active_mask_t)
+    sysA = solver.factorize(V_torso, active_mask=active_mask_t, neumann_all=neumann_all)
     if lam is None:
         # Floored L-curve: search only [lam_floor, LAM_CEIL] so the corner
         # detector cannot pick a pathologically small (under-regularizing) lambda.
@@ -106,7 +106,7 @@ def solve_from_field(solver, torso_ch_idx, V256, active256, lam=None, car=True,
 
 
 def load_commercial(pot_path, n_h, time_window=None,
-                    preprocess_reference=True, car=True):
+                    preprocess_reference=True, car=True, highpass_cutoff=1.0):
     """Load the commercial .potential HSP, matched to our processing regime.
     Returns (n_h, T) float64, or None if absent / mesh-mismatched."""
     if not os.path.exists(pot_path):
@@ -121,7 +121,7 @@ def load_commercial(pot_path, n_h, time_window=None,
     if preprocess_reference:
         # Match the input-side FIR HP @1 Hz + Savitzky-Golay (skip powerline
         # notch — no physical signal there at the heart side).
-        pot = fir_highpass(pot, fs=1000, cutoff_hz=1.0)
+        pot = fir_highpass(pot, fs=1000, cutoff_hz=highpass_cutoff)
         pot = savgol_smooth(pot, window_length=61, polyorder=4)
     if car:
         pot = pot - pot.mean(axis=0, keepdims=True)

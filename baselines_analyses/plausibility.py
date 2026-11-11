@@ -86,6 +86,7 @@ def main():
     ap.add_argument('--id', default='LOC3'); ap.add_argument('--vc', type=int, default=16)
     ap.add_argument('--splits', nargs='+', default=['test_internal', 'test_external'])
     ap.add_argument('--layouts', nargs='+', default=['template', 'kmeans'])
+    ap.add_argument('--dump_percase', default=None, help='write the per-recording rows to this CSV and stop (Source Data, 2026-10-27; JSON / md untouched)')
     a = ap.parse_args()
     buckets, _ = collect_split(seed=42)
     rows = []; mesh_cache = {}; V_cache = {}; ring_cache = {}
@@ -137,6 +138,8 @@ def main():
                                 st[f'vfrac{ringk}_plateau'] = float(np.mean(np.isinf(cvv[fin]))) if fin.any() else float('nan')
                             rows.append(dict(split=split, layout=lay, sid=sid, source=src, vset=setname, **st))
     df = pd.DataFrame(rows)
+    if a.dump_percase:
+        df.to_csv(a.dump_percase, index=False); print('wrote per-recording rows:', len(df)); return
     out = {'meta': dict(id=a.id, vc=a.vc, vmin=VMIN, definition='apparent CV per mesh edge = 10*d_cm/|dAT_ms| (m/s); '
                         'frac_slow = fraction of edges with CV below the bound; gated = both vertices in the commercial QRS-good set'),
            'cohort': {}, 'paired': {}}

@@ -122,14 +122,17 @@ class _ActiveSystem:
     it cannot be reduced by any choice of λ.
     """
 
-    def __init__(self, solver, V_torso, active_mask):
+    def __init__(self, solver, V_torso, active_mask, neumann_all=False):
+        # neumann_all (2026-10-23, reviewer point 3): the zero-flux condition holds at EVERY torso node of the
+        # geometry, measured or not, so optionally impose the Neumann rows at all torso nodes while the Dirichlet
+        # rows stay restricted to the active electrodes.
         Ad = solver.A_dir[active_mask]
-        An = solver.A_neu[active_mask]
+        An = solver.A_neu if neumann_all else solver.A_neu[active_mask]
         V = V_torso[active_mask].astype(np.float64)
-        zero = np.zeros_like(V)
+        zero = np.zeros((An.shape[0], V.shape[1]), dtype=np.float64)
 
-        A = np.vstack([Ad, An])                  # (2·n_active, n_src)
-        b = np.vstack([V, zero])                 # (2·n_active, T)
+        A = np.vstack([Ad, An])                  # (n_active + n_neu, n_src)
+        b = np.vstack([V, zero])                 # (n_active + n_neu, T)
 
         U, s, Vt = np.linalg.svd(A, full_matrices=False)
         Utb = U.T @ b                            # (r, T)
@@ -267,7 +270,7 @@ class MFSSolver:
 
     # ----- factorisation ----------------------------------------------
 
-    def factorize(self, V_torso, active_mask=None):
+    def factorize(self, V_torso, active_mask=None, neumann_all=False):
         """
         Pre-factor the active BC system for a specific torso measurement and
         active-channel mask. Returns an `_ActiveSystem` whose `.l_curve()`
@@ -282,7 +285,7 @@ class MFSSolver:
         """
         if active_mask is None:
             active_mask = np.ones(self.A_dir.shape[0], dtype=bool)
-        return _ActiveSystem(self, V_torso, active_mask)
+        return _ActiveSystem(self, V_torso, active_mask, neumann_all=neumann_all)
 
     # ----- backwards-compatible single-call methods --------------------
 

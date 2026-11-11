@@ -139,7 +139,7 @@ def summary():
         if key not in res or res[key].get('lvat95', {}).get('n_pairs', 0) < 200:   # skip splits whose run is incomplete
             continue
         L.append(r'\midrule'); first = True; lab = key.replace('test_', '').replace('_template', '').replace('_kmeans', ' ($k$-means)')
-        for e in ('tat', 'lvat95', 'lvdi', 'veu', 'at_sd', 'ari_mean'):
+        for e in ('lvat95', 'tat', 'lvdi', 'veu', 'at_sd', 'ari_mean'):   # LVAT first (clinical collaborators, 2026-10-22)
             ent = res[key].get(e)
             if not ent:
                 continue

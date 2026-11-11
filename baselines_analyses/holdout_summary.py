@@ -222,7 +222,7 @@ def main():
              r'Alternative & MAE & Ours $-$ alt.\ (rec.) & Ours $-$ alt.\ (pat.) & MAE & Ours $-$ alt.\ (rec.) & Ours $-$ alt.\ (pat.) \\',
              r'\midrule']
         for met, name in (('AT', 'Activation time'), ('RT', 'Repolarisation time')):
-            L.append(r'\multicolumn{7}{l}{\emph{%s, ms: Ours (PosQ-MAE retrained without the held-out patients, $16$ electrodes) %.1f template, %.1f $k$-means}} \\'
+            L.append(r'\multicolumn{7}{l}{\emph{%s, ms: PosQ-MAE (retrained without the held-out patients, $16$ electrodes) %.1f template, %.1f $k$-means}} \\'
                      % (name, H['template'][met]['mean_ours'], H['kmeans'][met]['mean_ours']))
             for key, label in alts:
                 cells = []

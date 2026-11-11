@@ -17,9 +17,10 @@ inverse computed from all valid vest electrodes, on an internal and on a held-ou
 
 > **Data are not included.** The recordings are clinical data that cannot be redistributed. All
 > cohort identifiers in this repository are anonymised (`cohortA`, `cohortB` = the two internal
-> sub-cohorts of one centre; `external` = the held-out external centre). The trained weights of the
-> final model (*N* = 16, training seed 42) are included in `results/final_model/` (see *Released
-> weights* below).
+> sub-cohorts of one centre; `external` = the held-out external cohort, an independent study at the
+> same centre). The trained weights of the final model (*N* = 16, training seed 42) are included in
+> `results/final_model/`, and those of its noise-robust variant in `results/robust_model/` (see
+> *Released weights* below).
 
 This release supersedes the PPE-MAE code of the first manuscript version (kept as the `v1`
 predecessor, see *Previous release* below): the model is new (`bsp_reconstruction/models_v2.py`),
@@ -72,7 +73,7 @@ Patients are directories; cohort roots are configured with environment variables
 ```bash
 export ECGI_COHORT_A_ROOT=/path/to/cohortA    # internal sub-cohort A  (training only)
 export ECGI_COHORT_B_ROOT=/path/to/cohortB    # internal sub-cohort B  (train / val / internal test)
-export ECGI_EXTERNAL_ROOT=/path/to/external   # external centre       (test only)
+export ECGI_EXTERNAL_ROOT=/path/to/external   # external cohort       (test only)
 export ECGI_SIM_ROOT=/path/to/sim             # optional: simulated cohort written by simulation/make_dataset.py
 export ECGI_CACHE_DIR=/path/to/cache          # optional: preprocessing + missing-mask cache
 export ECGI_FIG_DIR=/path/to/figures          # optional: where diagnostic plots are written
@@ -129,6 +130,20 @@ expect, then evaluate it:
 ```bash
 python bsp_reconstruction/install_final_model.py        # --link symlinks instead of copying
 bash training_sweeps/eval_test_runs.sh FINAL              # both test cohorts x both deployment layouts
+```
+
+`results/robust_model/` (added in v1.1.0) holds the noise-robust variant of Supplementary Note 19
+(PosQ-MAE-CAR+noise): the identical recipe, except that the input and the targets are re-referenced
+to the mean of the visible electrodes (`--train_reref car_vis`; the evaluation code applies the same
+reference at inference, read from its `args.json`) and that white or 5–45-Hz band-limited noise at
+5–30 dB is added to the visible channels of half of the training samples (`--noise_aug 0.5
+--noise_aug_snr 5 30`; the targets stay clean). It is as accurate as the final model on clean
+recordings, independent of the recording reference and much less sensitive to in-band noise (see the
+*Model card*); the main results of the paper use the final model. Install and evaluate it with
+
+```bash
+python bsp_reconstruction/install_final_model.py --model robust
+bash training_sweeps/eval_test_runs.sh ROBUST
 ```
 
 The weights were trained on the clinical recordings and contain no patient data. The two further
@@ -258,9 +273,10 @@ number below.
 
 **Model summary.** PosQ-MAE, position-queried masked autoencoder for body-surface potential
 completion; final configuration of the paper (*N* = 16, training seed 42). Developed by the authors
-(Imperial College London); contact: the corresponding author of the paper. Version v1.0.2 of this
-repository (code and weights; archived at https://doi.org/10.5281/zenodo.23574653); model card added
-2026-10-24. Regulatory status: none — research software, not a medical device.
+(Imperial College London); contact: the corresponding author of the paper. Version v1.1.0 of this
+repository (code and the weights of the final model and of its noise-robust variant; all versions
+archived at https://doi.org/10.5281/zenodo.23573242); model card added 2026-10-24, noise-robust
+variant added 2026-11-11. Regulatory status: none — research software, not a medical device.
 
 **Intended use.**
 
@@ -311,6 +327,22 @@ pacing states from 16 electrodes agree with the commercial reference as often as
 full-vest inverse. Primary metric: activation-time error against the commercial reference;
 secondary: repolarisation time, held-out field correlation, endpoint agreement.
 
+**Noise-robust variant** (`results/robust_model/`; Supplementary Note 19 of the paper). Same
+architecture, data, split and schedule, with the input and the targets in the reference of the
+visible electrodes and noise augmentation (see *Released weights*). Mean absolute error at *N* = 16
+under the fixed template layout, ms (final model in parentheses):
+
+| Condition | Internal AT | Internal RT | External AT | External RT |
+|---|---|---|---|---|
+| Clean recordings | 12.6 (13.1) | 26.8 (27.0) | 9.2 (9.1) | 19.8 (20.2) |
+| Common-average or single-electrode reference | 12.6 (13.6–13.9) | 26.8 (28.7–31.8) | 9.2 (9.0–9.2) | 19.8 (19.6–20.7) |
+| White noise at 10 or 5 dB, EMG-band noise at 10 dB | 12.9–13.7 (14.0–15.0) | 27.8–30.4 (33.5–38.5) | 9.3–9.4 (9.5–9.8) | 20.8–23.2 (23.1–29.3) |
+
+On clean recordings none of the eight comparisons with the final model (two cohorts, AT and RT, two
+layouts) is significant; under per-recording k-means placement its errors are 13.2 and 29.3 ms
+internally and 9.4 and 19.9 ms externally (final model 13.3, 27.9, 9.2 and 19.9 ms). Its output does
+not change with the recording reference, because the model re-references its input itself.
+
 **Warnings.**
 
 * The repolarisation gain over the raw full-vest inverse was seen only on the noisier internal
@@ -318,7 +350,12 @@ secondary: repolarisation time, held-out field correlation, endpoint agreement.
   of activation accuracy against the full vest.
 * Sensitive to in-band noise on the measured electrodes: at 5 dB white noise the internal
   repolarisation advantage disappears and 10 dB EMG-band noise removes most of it; activation
-  accuracy degrades more slowly than that of interpolation.
+  accuracy degrades more slowly than that of interpolation. The noise-robust variant keeps the
+  advantage at these noise levels (internal repolarisation error 27.8–30.4 ms against 39.2–39.7 ms
+  for the full vest).
+* The final model expects the vest's own signal reference: re-referencing the measured electrodes to
+  their common average or to one of them costs 0.4–0.8 ms of activation and 1.7–4.8 ms of
+  repolarisation accuracy internally. The noise-robust variant is independent of the reference.
 * Right-ventricular activation time is unreliable for every source on the internal cohort (even two
   full-vest solutions disagree).
 * Electrode-position errors up to 10 mm have no measurable effect; 40 mm (more than one electrode

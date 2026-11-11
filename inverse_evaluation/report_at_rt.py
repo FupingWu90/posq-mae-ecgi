@@ -133,7 +133,7 @@ if __name__ == '__main__':
     p.add_argument('--run_dir', required=True)
     p.add_argument('--splits', nargs='+', default=['test_internal', 'test_external'])
     p.add_argument('--n', type=int, default=None)
-    p.add_argument('--deploy_region', default=None, choices=['all', 'front', 'back'],
+    p.add_argument('--deploy_region', default=None, choices=['all', 'front', 'back', 'subA', 'subB'],
                    help="deployment torso half; default: args.json['select_region'] or 'all'")
     p.add_argument('--out_json', default=None,
                    help='output JSON (default <run_dir>/at_rt_results.json)')

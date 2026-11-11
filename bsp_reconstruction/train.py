@@ -55,6 +55,13 @@ def get_args():
     # fixed-VC selection
     p.add_argument('--vc', type=int, default=32,
                    help='number of visible valid channels kept as encoder input')
+    p.add_argument('--vc_random', type=int, nargs=2, default=None, metavar=('LO', 'HI'),
+                   help='variable-N training (2026-10-25): number of visible electrodes drawn per batch log-uniformly in [LO, HI]; validation keeps --vc')
+    p.add_argument('--train_reref', type=str, default='none', choices=['none', 'car_vis'],
+                   help="'car_vis' (2026-10-25): re-reference input and targets to the mean of the visible channels")
+    p.add_argument('--noise_aug', type=float, default=0.0,
+                   help='training augmentation (2026-10-25): probability per sample of additive white / 5-45 Hz noise on the visible channels')
+    p.add_argument('--noise_aug_snr', type=float, nargs=2, default=[5.0, 30.0], metavar=('LO_DB', 'HI_DB'))
     p.add_argument('--select_mode', type=str, default='cluster', choices=list(MODES),
                    help='train/val visible-channel selection mode')
     p.add_argument('--cluster_method', type=str, default='greedy', choices=list(CLUSTER_METHODS),
@@ -82,6 +89,10 @@ def get_args():
                    help='neighbours for the spatial Laplacian')
     p.add_argument('--reg_time_stride', type=int, default=10,
                    help='temporal subsampling for the spatial term (compute/memory)')
+    p.add_argument('--w_diff', type=float, default=0.0,
+                   help='weight of the difference-MATCHING loss |d/dt x_hat - d/dt x| on the decoded electrodes with ground '
+                        'truth (reviewer minor point 5, 2026-10-23); 0 = off; ramped with --reg_warmup_epochs like w_temporal')
+    p.add_argument('--diff_norm', type=str, default='l2', choices=['l1', 'l2'], help='norm of the difference-matching loss')
     p.add_argument('--reg_scope', type=str, default='recon', choices=['recon', 'masked'],
                    help="channels the smoothness acts on: recon (active&~visible) | "
                         "masked (all ~visible)")
@@ -222,6 +233,11 @@ def build_run_name(args, eff):
     data_tag = data_tag + (f"_val-{vs_}" if vs_ not in ('auto',) and not (vs_ == 'sim' and ts == 'sim') and not (vs_ == 'real' and ts != 'sim') else "")
     if getattr(args, 'init_from', ''):
         data_tag = data_tag + f"_init-{getattr(args, 'init_tag', '') or 'sim'}"
+    wd = getattr(args, 'w_diff', 0.0)
+    data_tag = data_tag + (f"_wd{wd:g}-{getattr(args, 'diff_norm', 'l2')}" if wd and wd > 0 else "")
+    vr_ = getattr(args, 'vc_random', None); data_tag = data_tag + (f"_vcr{vr_[0]}-{vr_[1]}" if vr_ else "")
+    data_tag = data_tag + ('_carvis' if getattr(args, 'train_reref', 'none') == 'car_vis' else '')
+    nz_ = float(getattr(args, 'noise_aug', 0.0) or 0.0); data_tag = data_tag + (f"_nz{nz_:g}" if nz_ > 0 else "")
     reg = getattr(args, 'select_region', 'all')
     data_tag = data_tag + (f"_reg-{reg}" if reg != 'all' else "")   # last in the chain
     pre = (f"{args.tag}__" if getattr(args, 'tag', '') else '')
@@ -329,7 +345,7 @@ def main(args):
           + (f"/{args.cluster_method}" if args.select_mode == 'cluster' else '')
           + (f"  select_region={args.select_region}" if args.select_region != 'all' else '')
           + f"  w_spatial={args.w_spatial}  w_temporal={args.w_temporal}"
-          + f"  reg_scope={args.reg_scope}")
+          + f"  reg_scope={args.reg_scope}" + (f"  w_diff={args.w_diff} ({args.diff_norm})" if args.w_diff > 0 else ''))
     print(f"Save dir: {save_dir}")
 
     if args.lr is None:

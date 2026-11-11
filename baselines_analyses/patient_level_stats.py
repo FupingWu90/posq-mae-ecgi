@@ -43,8 +43,13 @@ def paired_stats(ours, alt, met, pmap):
     px, py = sx / cnt, sy / cnt
     dp = px - py
     p_pat = wilcoxon(dp).pvalue if np.any(dp != 0) else 1.0
+    from scipy.stats import t as _t, ttest_1samp as _tt   # patient-level t-based 95% CI (2026-10-23, reviewer point 5b)
+    se = float(np.std(dp, ddof=1) / np.sqrt(len(dp))) if len(dp) > 1 else float('nan')
+    tc = float(_t.ppf(0.975, len(dp) - 1)) if len(dp) > 1 else float('nan')
     return dict(n_rec=int(len(d)), med_rec=float(np.median(d)), p_rec=float(p_rec),
                 n_pat=int(len(pats)), med_pat=float(np.median(dp)), mean_pat=float(np.mean(dp)), p_pat=float(p_pat),
+                se_pat=se, ci_lo=float(np.mean(dp) - tc * se), ci_hi=float(np.mean(dp) + tc * se),
+                p_t_pat=float(_tt(dp, 0.0).pvalue) if len(dp) > 1 else float('nan'),
                 pat_better=int((dp < 0).sum()), pat_worse=int((dp > 0).sum()),
                 mean_ours_pat=float(np.mean(px)), mean_alt_pat=float(np.mean(py)))
 

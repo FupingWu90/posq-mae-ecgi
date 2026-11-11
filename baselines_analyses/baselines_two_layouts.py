@@ -51,7 +51,8 @@ def learned_percase(path, source):
 
 
 def classical_percase(entries, method, vc):
-    rows = {s: e for (s, m, v), e in entries.items() if m == method and v == vc}
+    from dedup import ok as _dedup_ok   # 2026-11-11 audit fix: the classical rows were the only ones not de-duplicated
+    rows = {s: e for (s, m, v), e in entries.items() if m == method and v == vc and _dedup_ok(s)}
     if not rows:
         return None
     df = pd.DataFrame.from_dict(rows, orient='index')

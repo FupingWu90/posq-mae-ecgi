@@ -58,6 +58,39 @@ def global_norm(ecg, visible_mask, eps=1e-8):
     return ecg / g.view(B, 1, 1), g
 
 
+def _car_visible(ecg, visible):
+    """Re-reference every channel to the mean of the VISIBLE channels (per sample and time step), so that the
+    input and the targets are expressed in a reference the deployed sparse array can form itself (2026-10-25)."""
+    w = visible.to(ecg.dtype).unsqueeze(-1)                                           # (B, C, 1)
+    m = (ecg * w).sum(dim=1, keepdim=True) / w.sum(dim=1, keepdim=True).clamp_min(1.0)
+    return ecg - m
+
+
+def _noise_aug(ecg, visible, p, snr_lo, snr_hi, rng):
+    """Training augmentation (2026-10-25): additive Gaussian noise on the VISIBLE channels only (the targets at the
+    hidden electrodes stay clean), white or 5-45 Hz band-limited (EMG band) with equal probability, SNR uniform in
+    [snr_lo, snr_hi] dB relative to the median std of the visible channels, applied to each sample with probability p."""
+    B, C, L = ecg.shape
+    out = ecg
+    for b in range(B):
+        if rng.random() >= p:
+            continue
+        idx = visible[b].nonzero(as_tuple=False).squeeze(1)
+        if idx.numel() == 0:
+            continue
+        snr = float(rng.uniform(snr_lo, snr_hi))
+        sigma = ecg[b, idx].float().std(dim=1).median().clamp_min(1e-8) * (10.0 ** (-snr / 20.0))
+        nz = torch.randn(idx.numel(), L, device=ecg.device, dtype=torch.float32)
+        if rng.random() < 0.5:                                                        # EMG band (fs = 1 kHz)
+            F = torch.fft.rfft(nz, dim=1); f = torch.fft.rfftfreq(L, d=1e-3).to(ecg.device)
+            nz = torch.fft.irfft(F * ((f >= 5.0) & (f <= 45.0)).to(F.dtype), n=L, dim=1)
+        nz = nz / nz.std(dim=1, keepdim=True).clamp_min(1e-8) * sigma
+        if out is ecg:
+            out = ecg.clone()
+        out[b, idx] = out[b, idx] + nz.to(ecg.dtype)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # LR schedule
 # ---------------------------------------------------------------------------
@@ -96,6 +129,8 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
     reg_scale = min(1.0, (epoch + 1) / rw) if rw and rw > 0 else 1.0
     ws_eff = args.w_spatial * reg_scale
     wt_eff = args.w_temporal * reg_scale
+    wd_eff = float(getattr(args, 'w_diff', 0.0)) * reg_scale
+    diff_kw = {'w_diff': wd_eff} if wd_eff > 0.0 else {}     # only PosQ-MAE models accept w_diff; v1 classes keep their signature
     if train_logger is not None and rw and rw > 0:
         train_logger.write(f"# epoch {epoch}: reg_scale {reg_scale:.3f} "
                            f"-> w_spatial {ws_eff:.4g} w_temporal {wt_eff:.4g}\n")
@@ -118,10 +153,15 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
         coords       = coords.to(device, non_blocking=True)        # (B, C, 3)
         active = ~missing_mask                                     # (B, C) bool
 
-        # Fixed-VC visible-channel selection (varies per epoch via select_rng).
+        # Fixed-VC visible-channel selection (varies per epoch via select_rng); --vc_random lo hi draws the number of
+        # visible electrodes per batch log-uniformly in [lo, hi] (variable-N model, 2026-10-25).
+        vc_eff = args.vc
+        vr = getattr(args, 'vc_random', None)
+        if vr:
+            vc_eff = int(round(float(np.exp(select_rng.uniform(np.log(vr[0]), np.log(vr[1]))))))
         visible_np, n_fb = select_visible_batch(
             coords.detach().cpu().numpy(), active.detach().cpu().numpy(),
-            args.vc, args.select_mode, args.cluster_method, select_rng,
+            vc_eff, args.select_mode, args.cluster_method, select_rng,
             region=region, return_info=True)
         n_region_fallback += n_fb
         usage_counts += visible_np.sum(axis=0).astype(np.int64)
@@ -130,8 +170,12 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
 
         # Global mode: normalize by a single scale from the VC channels (physical
         # signal comes from the dataset in this mode).
+        if getattr(args, 'train_reref', 'none') == 'car_vis':                        # common-average reference of the visible set
+            ecg = _car_visible(ecg, visible)
         if getattr(args, 'norm_mode', 'per_channel') == 'global':
             ecg, _ = global_norm(ecg, visible)
+        if float(getattr(args, 'noise_aug', 0.0) or 0.0) > 0:
+            ecg = _noise_aug(ecg, visible, float(args.noise_aug), *getattr(args, 'noise_aug_snr', [5.0, 30.0]), select_rng)
 
         is_update_step = (step + 1) % accum_iter == 0
         if step % accum_iter == 0:
@@ -139,22 +183,24 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
 
         if loss_scaler is not None:
             with torch.amp.autocast('cuda'):
-                loss, _, L_rec, L_sp, L_tp = model.forward_fixedn(
+                comp = model.forward_fixedn(
                     ecg, active, coords, visible,
-                    w_spatial=ws_eff, w_temporal=wt_eff,
+                    w_spatial=ws_eff, w_temporal=wt_eff, **diff_kw,
                     reg_knn=args.reg_knn, reg_time_stride=args.reg_time_stride,
                     reg_scope=args.reg_scope, return_components=True)
+            loss, _, L_rec, L_sp, L_tp = comp[:5]; L_df = comp[5] if len(comp) > 5 else L_rec * 0.0
             loss = loss / accum_iter
             loss_scaler.scale(loss).backward()
             if is_update_step:
                 loss_scaler.step(optimizer)
                 loss_scaler.update()
         else:
-            loss, _, L_rec, L_sp, L_tp = model.forward_fixedn(
+            comp = model.forward_fixedn(
                 ecg, active, coords, visible,
-                w_spatial=ws_eff, w_temporal=wt_eff,
+                w_spatial=ws_eff, w_temporal=wt_eff, **diff_kw,
                 reg_knn=args.reg_knn, reg_time_stride=args.reg_time_stride,
                 reg_scope=args.reg_scope, return_components=True)
+            loss, _, L_rec, L_sp, L_tp = comp[:5]; L_df = comp[5] if len(comp) > 5 else L_rec * 0.0
             loss = loss / accum_iter
             loss.backward()
             if is_update_step:
@@ -165,7 +211,7 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
             raise ValueError(f"Non-finite loss: {loss_val}")
 
         metric_logger.update(loss=loss_val, L_recon=float(L_rec.item()),
-                             L_spatial=float(L_sp.item()), L_temporal=float(L_tp.item()))
+                             L_spatial=float(L_sp.item()), L_temporal=float(L_tp.item()), L_diff=float(L_df.item()))
 
         global_step = epoch * (len(loader) // max(accum_iter, 1)) + step // max(accum_iter, 1)
         if log_writer is not None and is_update_step:
@@ -173,6 +219,7 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
             log_writer.add_scalar('train/L_recon', float(L_rec.item()), global_step)
             log_writer.add_scalar('train/L_spatial', float(L_sp.item()), global_step)
             log_writer.add_scalar('train/L_temporal', float(L_tp.item()), global_step)
+            log_writer.add_scalar('train/L_diff', float(L_df.item()), global_step)
 
         log_interval = min(10, max(1, len(loader) // max(accum_iter, 1)))
         if (train_logger is not None and is_update_step
@@ -181,7 +228,7 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, select_rng,
             train_logger.write(
                 f"epoch {epoch:04d}  iter {step + 1:05d}  loss {loss_val:.6f}  "
                 f"L_recon {float(L_rec.item()):.6f}  L_spatial {float(L_sp.item()):.6f}  "
-                f"L_temporal {float(L_tp.item()):.6f}  lr {cur_lr:.2e}\n")
+                f"L_temporal {float(L_tp.item()):.6f}  L_diff {float(L_df.item()):.6f}  lr {cur_lr:.2e}\n")
             train_logger.flush()
 
     avg = {k: v.avg for k, v in metric_logger.meters.items()}
@@ -221,7 +268,7 @@ def _compute_metrics(pred_b, gt_b):
 @torch.no_grad()
 def run_eval(model, loader, device, vc, mode, cluster_method, seed,
              want_vis=False, save_dir=None, max_vis_samples=12, max_vis_channels=8,
-             norm_mode='per_channel', region='all'):
+             norm_mode='per_channel', region='all', reref='none'):
     """Evaluate reconstruction of the (active & ~visible) channels under one
     selection (mode, cluster_method[, region]). Selection is deterministic (rng
     seeded by `seed`) so the metric is reproducible across epochs / modes."""
@@ -251,6 +298,8 @@ def run_eval(model, loader, device, vc, mode, cluster_method, seed,
         visible = torch.from_numpy(visible_np).to(device)
         sel_s += time.time() - _ts
 
+        if reref == 'car_vis':
+            ecg = _car_visible(ecg, visible)
         if norm_mode == 'global':
             ecg, _ = global_norm(ecg, visible)
 
@@ -324,7 +373,7 @@ def evaluate(model, loader, device, args):
     res = run_eval(model, loader, device, args.vc, vmode,
                    vcm, seed=args.seed, want_vis=False,
                    norm_mode=getattr(args, 'norm_mode', 'per_channel'),
-                   region=getattr(args, 'select_region', 'all'))
+                   region=getattr(args, 'select_region', 'all'), reref=getattr(args, 'train_reref', 'none'))
     print("  ".join(f"{k}: {res[k]:.4f}" for k in ('loss', 'mae', 'rmse', 'cc')))
     return res
 
@@ -344,7 +393,7 @@ def test_all_modes(model, loader, device, args, save_dir):
         res = run_eval(model, loader, device, args.vc, mode, cm,
                        seed=args.seed, want_vis=True, save_dir=vis_dir,
                        norm_mode=getattr(args, 'norm_mode', 'per_channel'),
-                       region=getattr(args, 'select_region', 'all'))
+                       region=getattr(args, 'select_region', 'all'), reref=getattr(args, 'train_reref', 'none'))
         out[label] = res
         print(f"  [test {label:16s}] mae {res['mae']:.4f}  rmse {res['rmse']:.4f}  "
               f"cc {res['cc']:.4f}  (n={res['n_samples']}, "

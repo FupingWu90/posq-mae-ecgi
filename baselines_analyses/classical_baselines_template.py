@@ -395,6 +395,9 @@ KEYS = ['bsp_cc', 'bsp_mae', 'hsp_cc', 'hsp_mae', 'hsp_cc_src2', 'hsp_mae_src2',
 
 
 def summarize(layout):
+    sys.path.insert(0, os.path.join(PROJ, 'baselines_analyses'))
+    from dedup import ok as _dedup_ok
+    from tgate_rule import ok as _tgate_ok
     summary = {'meta': dict(layout=layout, selection=LAYOUTS[layout], vcs=VCS, methods=METHODS,
                             lam=json.load(open(lam_file(layout))) if os.path.exists(lam_file(layout)) else None,
                             definitions='verbatim v1: fidelity_baselines (bsp_cc/hsp_*), interp_baseline & '
@@ -415,6 +418,11 @@ def summarize(layout):
             d = json.load(open(os.path.join(cache_dir, fn)))
             if 'failed' in d:
                 n_fail += 1; failed.append(d['failed']); continue
+            # 2026-11-11 audit fix: one recording per content key (bsp_reconstruction/dedup.py) and the RT/ARI T-gate rule
+            # (baselines_analyses/tgate_rule.py), as results_v2.classical_percase applies them when loading the cache
+            if not _dedup_ok(d['sid']):
+                continue
+            t_ok = {'com': _tgate_ok(split, d['sid'], 'commercial'), 'src2': _tgate_ok(split, d['sid'], 'src2_allvalid')}
             n_ok += 1
             for vc in VCS:
                 nsub[str(vc)].append(d.get('n_template_sub', {}).get(str(vc), 0))
@@ -423,6 +431,10 @@ def summarize(layout):
                     e = d['results'].get(m, {}).get(str(vc))
                     if not e:
                         continue
+                    e = dict(e)
+                    for suf in ('com', 'src2'):
+                        if not t_ok[suf]:
+                            e[f'rt_{suf}'] = e[f'ari_{suf}'] = None
                     csv_rows.append(dict(split=split, sid=d['sid'], vc=vc, method=m,
                                          **{k: e.get(k) for k in KEYS}))
                     for k in KEYS:

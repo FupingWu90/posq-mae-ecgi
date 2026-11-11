@@ -54,6 +54,7 @@ def load_model(run_dir, device):
                     map_location='cpu', weights_only=False)
     model.load_state_dict(ck['model'])
     model.to(device).eval()
+    model.train_reref = args.get('train_reref', 'none') or 'none'   # 2026-10-25: models trained in the visible-set CAR frame
     return model, keep_idx.astype(np.int64), args
 
 
@@ -63,9 +64,41 @@ def _to256(field252, act_sub, keep_idx):
     return V256, a256
 
 
+def _inject_noise(prep, active, kind, level_db, seed, ecgdata_path):
+    """Additive noise on the ACTIVE channels of the preprocessed field (reviewer point 2b, 2026-10-23).
+    level_db: SNR in dB relative to the median RMS of the active channels (sigma = rms_median * 10^(-SNR/20)); every
+    noisy channel receives noise of RMS sigma.  kind: 'white' (Gaussian), 'emg' (white noise band-passed 5-45 Hz),
+    'bw' (baseline wander: three sinusoids 0.2-0.8 Hz with random phases).  Reproducible per recording."""
+    import zlib
+    from scipy.signal import butter, sosfiltfilt
+    rng = np.random.default_rng(int(seed) * 1000003 + zlib.crc32(os.path.basename(ecgdata_path).encode()))
+    act = np.where(active)[0]
+    rms = np.sqrt((prep[act].astype(np.float64) ** 2).mean(axis=1))
+    rms_ref = float(np.median(rms[rms > 1e-8])) if (rms > 1e-8).any() else 1.0
+    sigma = rms_ref * 10 ** (-float(level_db) / 20.0)
+    T = prep.shape[1]
+    if kind == 'white':
+        nz = rng.standard_normal((len(act), T))
+    elif kind == 'emg':
+        sos = butter(4, [5.0, 45.0], btype='band', fs=1000.0, output='sos')
+        nz = sosfiltfilt(sos, rng.standard_normal((len(act), T + 2000)), axis=1)[:, 1000:-1000]
+    elif kind == 'bw':
+        t = np.arange(T) / 1000.0
+        nz = np.zeros((len(act), T))
+        for _ in range(3):
+            f = rng.uniform(0.2, 0.8, size=len(act)); ph = rng.uniform(0, 2 * np.pi, size=len(act)); amp = rng.uniform(0.5, 1.0, size=len(act))
+            nz += amp[:, None] * np.sin(2 * np.pi * f[:, None] * t[None, :] + ph[:, None])
+    else:
+        raise ValueError(f'unknown noise kind {kind!r}')
+    nz = nz / (nz.std(axis=1, keepdims=True) + 1e-12) * sigma
+    out = prep.copy(); out[act] = (prep[act] + nz).astype(np.float32)
+    return out
+
+
 def build_context(ecgdata_path, torso_path, keep_idx, args,
                   vc=16, mode='cluster', cluster_method='greedy', seed=42,
-                  region='all', extra_loss=0.0, extra_loss_seed=0):
+                  region='all', extra_loss=0.0, extra_loss_seed=0,
+                  highpass_cutoff=1.0, reref='none', noise=None):
     """MODEL-FREE: prep signal + masks + VC selection + src1/src2 fields.
     `region` ('all' | 'front' | 'back') restricts the VC candidates to one torso
     half (channel_select.region_mask); 'all' is a strict no-op.
@@ -94,7 +127,10 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
         if k > 0:
             missing252 = missing252.copy(); missing252[rng_l.choice(act, k, replace=False)] = True
     active252 = ~missing252
-    prep252 = preprocess_ecgi(ecg252, missing252).astype(np.float32)
+    prep252 = preprocess_ecgi(ecg252, missing252, highpass_cutoff=highpass_cutoff).astype(np.float32)
+    prep252_clean = prep252
+    if noise is not None:    # (kind, SNR_dB, seed): noise injection on the active channels (reviewer point 2b)
+        prep252 = _inject_noise(prep252, active252, noise[0], noise[1], noise[2], ecgdata_path)
 
     rng = np.random.default_rng(seed)
     visible252, sel_info = select_visible_channels(coords, active252, vc, mode,
@@ -102,6 +138,17 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
                                                    return_info=True)
     if visible252.sum() == 0:
         return None
+    prep252_meas = prep252_clean      # the clean, original-reference field: BSP CC diagnostic only
+    prep252_vest = prep252            # full-vest field (noise included, vest reference): the re-referencing below acts on the
+                                      # sparse inputs only (2026-11-11 audit fix: src2 was built from the partly re-referenced array)
+    if reref != 'none':
+        # sensitivity test (2026-10-23, reviewer point 4c): a sparse device cannot share the vest's reference, so the
+        # visible channels are re-referenced to their own common average ('car') or to the first visible electrode
+        # ('ch0') before they reach the model and the VC-only inverse; the held-out measured channels keep the
+        # original reference (used only for the BSP CC diagnostic).
+        prep252 = prep252.copy(); vis_idx = np.where(visible252)[0]
+        ref_sig = prep252[vis_idx].mean(axis=0) if reref == 'car' else prep252[vis_idx[0]].copy()
+        prep252[vis_idx] = prep252[vis_idx] - ref_sig[None, :]
     # g = median std of the VC channels, computed EXACTLY as the training-time
     # engine.global_norm (torch std ddof=1 + torch.median) so the model sees the
     # same input scale it was normalized with.
@@ -110,7 +157,7 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
         g = 1.0
 
     return dict(
-        keep_idx=keep_idx, prep252=prep252, coords=coords,
+        keep_idx=keep_idx, prep252=prep252, prep252_meas=prep252_meas, coords=coords,
         active252=active252, visible252=visible252, g=g, crop_start=s, L=L,
         n_active=int(active252.sum()), n_active_orig=n_active_orig, n_vc=int(visible252.sum()),
         n_recon=int((active252 & ~visible252).sum()),
@@ -118,7 +165,7 @@ def build_context(ecgdata_path, torso_path, keep_idx, args,
         n_region_fallback=sel_info['n_region_fallback'],
         n_template_sub=sel_info.get('n_template_sub', 0),
         src1_vc=_to256(prep252, visible252, keep_idx),          # real, VC only
-        src2_allvalid=_to256(prep252, active252, keep_idx),     # real, all valid (ref)
+        src2_allvalid=_to256(prep252_vest, active252, keep_idx),     # real, all valid (ref); identical to prep252 when reref='none'
     )
 
 
@@ -129,7 +176,7 @@ def held_out_bsp_cc(ctx, recon252):
     electrode temporal Pearson CC with the measured preprocessed signal, mean
     over electrodes (std<1e-8 guard on either side). Returns (cc, n_electrodes);
     cc is NaN if no electrode qualifies."""
-    prep252 = ctx['prep252']
+    prep252 = ctx.get('prep252_meas', ctx['prep252'])
     held = ctx['active252'] & ~ctx['visible252']
     ccs = []
     for c in np.where(held)[0]:
@@ -146,6 +193,13 @@ def reconstruct_sources(model, ctx, device):
     """MODEL-DEPENDENT: run the model on the context, return src3/src4 fields."""
     keep_idx = ctx['keep_idx']; prep252 = ctx['prep252']; g = ctx['g']
     visible252 = ctx['visible252']; active252 = ctx['active252']
+    m_vis = None
+    if getattr(model, 'train_reref', 'none') == 'car_vis':   # 2026-10-25: inputs in the visible-set CAR frame, as in training
+        m_vis = prep252[visible252].mean(axis=0, keepdims=True).astype(np.float32)
+        prep252 = prep252 - m_vis
+        # g exactly as the training-time engine.global_norm (torch std ddof=1 + torch.median, the lower median), as for the
+        # standard path in build_context (2026-11-11 audit fix: was np.std ddof=0 + np.median, ~3% larger on average)
+        g = float(torch.from_numpy(np.ascontiguousarray(prep252[visible252])).std(dim=1).median()); g = g if g > 1e-8 else 1.0
     x = torch.from_numpy(prep252 / g).unsqueeze(0).to(device)
     active_t = torch.from_numpy(active252).unsqueeze(0).to(device)
     coords_t = torch.from_numpy(ctx['coords']).unsqueeze(0).to(device)
@@ -153,6 +207,8 @@ def reconstruct_sources(model, ctx, device):
     _, pred = model.forward_fixedn(x, active_t, coords_t, vis_t,
                                    w_spatial=0.0, w_temporal=0.0)
     recon252 = model.unpatchify(pred).squeeze(0).squeeze(0).cpu().numpy() * g
+    if m_vis is not None:                                       # back to the vest reference frame
+        recon252 = recon252 + m_vis; prep252 = ctx['prep252']
     assembled252 = np.where(visible252[:, None], prep252, recon252).astype(np.float32)
     all_keep = np.ones(len(keep_idx), dtype=bool)
     return dict(
